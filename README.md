@@ -10,8 +10,16 @@ A desktop application for managing Minecraft Bedrock Dedicated Server addons. Pr
 - Enable/disable behavior and resource packs per world
 - Bulk operations for managing multiple addons
 - Server status monitoring
-- Version compatibility checking (NOT IMPLEMENTED)
 - Search and filter installed addons
+
+### Future Plans
+
+- Remote server management
+- Version compatibility checking
+- Manage multiple servers
+
+### Pipe Dreams
+If this takes off and does well, I'll look into adapting this project into an actual Minecraft Bedrock Server Launcher. Meaning that it can spin up servers, Manage Servers beyond just addons (Users, Worlds, etc.), Logging, Statistics, and more!
 
 ## Requirements
 
