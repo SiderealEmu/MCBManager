@@ -20,7 +20,7 @@ A desktop application for managing Minecraft Bedrock Dedicated Server addons. Pr
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/MCBManager.git
+git clone https://github.com/SiderealEmu/MCBManager.git
 cd MCBManager
 
 # Install dependencies
