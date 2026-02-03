@@ -67,6 +67,12 @@ python main.py
 
 Configuration is stored in `~/.minecraft_addon_manager/config.json`.
 
+## Support
+
+If you find MCBManager useful, consider supporting development:
+
+[![Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/siderealemu)
+
 ## License
 
 MIT
