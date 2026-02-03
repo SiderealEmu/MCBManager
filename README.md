@@ -21,7 +21,7 @@ A desktop application for managing Minecraft Bedrock Dedicated Server addons. Pr
 Download the latest release for your platform from the [Releases](https://github.com/SiderealEmu/MCBManager/releases) page:
 
 - **Windows:** `MCBManager-windows.exe`
-- **macOS:** `MCBManager-macos.app`
+- **macOS:** `MCBManager-macos.dmg`
 - **Linux:** `MCBManager-linux.bin`
 
 Simply download and run the executable. No installation required.
@@ -30,10 +30,7 @@ Simply download and run the executable. No installation required.
 
 **Windows:** You may see a SmartScreen warning on first run. Click "More info" → "Run anyway".
 
-**macOS:** You may need to allow the app in System Preferences → Security & Privacy. If you get a "damaged" error, run:
-```bash
-xattr -cr /path/to/MCBManager-macos.app
-```
+**macOS:** Double-click the `.dmg` file to mount it, then drag the app to your Applications folder. You may need to allow the app in System Preferences → Security & Privacy on first run.
 
 **Linux:** Make the file executable before running:
 ```bash

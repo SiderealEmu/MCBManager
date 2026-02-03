@@ -16,8 +16,8 @@ jobs:
             artifact_name: MCBManager.exe
             asset_name: MCBManager-windows.exe
           - os: macos-latest
-            artifact_name: MCBManager
-            asset_name: MCBManager-macos.app
+            artifact_name: MCBManager.dmg
+            asset_name: MCBManager-macos.dmg
           - os: ubuntu-latest
             artifact_name: MCBManager
             asset_name: MCBManager-linux.bin
@@ -49,6 +49,13 @@ jobs:
       - name: Build executable
         run: |
           pyinstaller --onefile --windowed --name MCBManager --collect-all customtkinter main.py
+
+      - name: Create DMG (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          mkdir -p dmg_contents
+          cp dist/MCBManager dmg_contents/
+          hdiutil create -volname "MCBManager" -srcfolder dmg_contents -ov -format UDZO dist/MCBManager.dmg
 
       - name: Rename artifact (Unix)
         if: matrix.os != 'windows-latest'
