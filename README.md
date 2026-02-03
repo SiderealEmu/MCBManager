@@ -12,7 +12,7 @@ A desktop application for managing Minecraft Bedrock Dedicated Server addons. Pr
 - Enable/disable behavior and resource packs per world
 - Bulk operations for managing multiple addons
 - Server status monitoring
-- Version compatibility checking
+- Version compatibility checking (NOT IMPLEMENTED)
 - Search and filter installed addons
 
 ## Requirements

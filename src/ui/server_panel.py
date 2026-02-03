@@ -28,7 +28,9 @@ class ServerPanel(ctk.CTkFrame):
         self._poll_job_id = None
         self._poll_interval = 5000  # 5 seconds
         self._query_in_progress = False
+        self._monitor_in_progress = False
         self._pending_version_result = None
+        self._pending_monitor_result = None
 
         # Prevent frame from shrinking
         self.grid_propagate(False)
@@ -148,34 +150,18 @@ class ServerPanel(ctk.CTkFrame):
 
     def refresh(self) -> None:
         """Refresh the server status display."""
-        # Update status
-        self.server_monitor.check_status()
-        self.update_status()
+        # Update server info from properties (doesn't require network)
+        self._update_server_info()
 
-        # Update server info
+        # Check server status in background
+        if not self._monitor_in_progress:
+            self._monitor_in_progress = True
+            thread = threading.Thread(target=self._check_status_background, daemon=True)
+            thread.start()
+
+    def _update_server_info(self) -> None:
+        """Update server info display from properties."""
         if self.server_properties.is_loaded:
-            # Query server for version (only if server is running)
-            if self.server_monitor.is_running:
-                status = self.status_query.query()
-                if status.online and status.version:
-                    # Save the version to config for when server goes offline
-                    config.last_known_server_version = status.version
-                    self.info_items["version"].configure(text=status.version_string)
-                elif config.last_known_server_version:
-                    # Query failed but we have a cached version
-                    self.info_items["version"].configure(
-                        text=config.last_known_server_version
-                    )
-                else:
-                    self.info_items["version"].configure(text="Query failed")
-            else:
-                # Server offline - show last known version if available
-                if config.last_known_server_version:
-                    self.info_items["version"].configure(
-                        text=f"{config.last_known_server_version} (offline)"
-                    )
-                else:
-                    self.info_items["version"].configure(text="Server offline")
             self.info_items["server_name"].configure(
                 text=self._truncate(self.server_properties.server_name, 20)
             )
@@ -196,7 +182,8 @@ class ServerPanel(ctk.CTkFrame):
             )
         else:
             for key in self.info_items:
-                self.info_items[key].configure(text="-")
+                if key != "version":
+                    self.info_items[key].configure(text="-")
 
         # Update path display
         if config.server_path:
@@ -220,8 +207,28 @@ class ServerPanel(ctk.CTkFrame):
 
     def _poll_status(self) -> None:
         """Poll the server status and schedule the next poll."""
-        # Check if server is running (fast, local check)
-        self.server_monitor.check_status()
+        # Check server status in background to avoid UI freeze
+        if not self._monitor_in_progress:
+            self._monitor_in_progress = True
+            thread = threading.Thread(target=self._check_status_background, daemon=True)
+            thread.start()
+
+        # Schedule next poll
+        self._poll_job_id = self.after(self._poll_interval, self._poll_status)
+
+    def _check_status_background(self) -> None:
+        """Check server status in background thread."""
+        try:
+            is_running = self.server_monitor.check_status()
+            self._pending_monitor_result = is_running
+            # Schedule UI update on main thread
+            self.after(0, self._update_status_from_result)
+        except Exception:
+            self._monitor_in_progress = False
+
+    def _update_status_from_result(self) -> None:
+        """Update status display from background check (called on main thread)."""
+        self._monitor_in_progress = False
         self.update_status()
 
         # Query server version in background if running and not already querying
@@ -239,9 +246,6 @@ class ServerPanel(ctk.CTkFrame):
                 )
             else:
                 self.info_items["version"].configure(text="Server offline")
-
-        # Schedule next poll
-        self._poll_job_id = self.after(self._poll_interval, self._poll_status)
 
     def _query_version_background(self) -> None:
         """Query server version in background thread."""

@@ -2,10 +2,21 @@
 
 import platform
 import subprocess
+import sys
 from pathlib import Path
 from typing import Optional
 
 from ..config import config
+
+
+def _get_subprocess_startupinfo():
+    """Get subprocess startupinfo to hide console window on Windows."""
+    if sys.platform == "win32":
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = subprocess.SW_HIDE
+        return startupinfo
+    return None
 
 
 class ServerMonitor:
@@ -43,6 +54,10 @@ class ServerMonitor:
                 ["tasklist", "/FI", "IMAGENAME eq bedrock_server.exe"],
                 stderr=subprocess.DEVNULL,
                 text=True,
+                startupinfo=_get_subprocess_startupinfo(),
+                creationflags=subprocess.CREATE_NO_WINDOW
+                if sys.platform == "win32"
+                else 0,
             )
             if "bedrock_server.exe" in output.lower():
                 self._process_name = "bedrock_server.exe"
