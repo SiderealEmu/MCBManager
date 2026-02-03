@@ -1,10 +1,12 @@
 """Main application window."""
 
+import sys
 from pathlib import Path
 from tkinter import filedialog, messagebox
 from typing import Optional
 
 import customtkinter as ctk
+from PIL import Image, ImageTk
 
 from ..addon import Addon, AddonManager
 from ..config import config
@@ -23,6 +25,9 @@ class MainWindow(ctk.CTk):
         self.title("MCBManager")
         self.geometry(f"{config.window_width}x{config.window_height}")
         self.minsize(900, 600)
+
+        # Set window icon
+        self._set_icon()
 
         # Set appearance
         ctk.set_appearance_mode(config.theme)
@@ -49,6 +54,32 @@ class MainWindow(ctk.CTk):
 
         # Bind window close
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _set_icon(self) -> None:
+        """Set the window and taskbar icon."""
+        # Determine base path (handles PyInstaller bundled apps)
+        if getattr(sys, "frozen", False):
+            base_path = Path(sys._MEIPASS)
+        else:
+            base_path = Path(__file__).parent.parent.parent
+
+        icon_path = base_path / "assets" / "MCBManagerIcon.png"
+        ico_path = base_path / "assets" / "MCBManagerIcon.ico"
+
+        try:
+            # On Windows, use .ico for taskbar icon if available
+            if ico_path.exists():
+                self.iconbitmap(str(ico_path))
+            if icon_path.exists():
+                # Also set iconphoto for window title bar icon
+                icon_image = Image.open(icon_path)
+                icon_photo = ImageTk.PhotoImage(icon_image)
+                # Keep reference to prevent garbage collection
+                self._icon_photo = icon_photo
+                self.iconphoto(True, icon_photo)
+        except Exception:
+            # Silently fail if icon cannot be loaded
+            pass
 
     def _create_layout(self) -> None:
         """Create the main layout."""

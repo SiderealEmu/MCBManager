@@ -1,6 +1,6 @@
 # MCBManager
 
-![MCBManager](MCBManager.png)
+![MCBManager](assets/MCBManager.png)
 
 A desktop application for managing Minecraft Bedrock Dedicated Server addons. Provides a GUI for importing, enabling, disabling, and deleting behavior and resource packs. No longer do you have to unzip addons manually, input pack_id or versions! Just download addons, put them all in a folder, and MCBManager will handle the rest!
 

@@ -27,7 +27,7 @@ jobs:
 
       - name: Build executable
         run: |
-          pyinstaller --onefile --windowed --name MCBManager --collect-all customtkinter main.py
+          pyinstaller --onefile --windowed --name MCBManager --icon assets/MCBManagerIcon.ico --add-data "assets;assets" --collect-all customtkinter main.py
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -60,7 +60,7 @@ jobs:
 
       - name: Build executable
         run: |
-          pyinstaller --onefile --windowed --name MCBManager --collect-all customtkinter main.py
+          pyinstaller --onefile --windowed --name MCBManager --add-data "assets:assets" --collect-all customtkinter main.py
           mv dist/MCBManager dist/MCBManager-linux.bin
 
       - name: Upload artifact
@@ -87,9 +87,24 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
+      - name: Create macOS icon
+        run: |
+          mkdir -p MCBManagerIcon.iconset
+          sips -z 16 16 assets/MCBManagerIcon.png --out MCBManagerIcon.iconset/icon_16x16.png
+          sips -z 32 32 assets/MCBManagerIcon.png --out MCBManagerIcon.iconset/icon_16x16@2x.png
+          sips -z 32 32 assets/MCBManagerIcon.png --out MCBManagerIcon.iconset/icon_32x32.png
+          sips -z 64 64 assets/MCBManagerIcon.png --out MCBManagerIcon.iconset/icon_32x32@2x.png
+          sips -z 128 128 assets/MCBManagerIcon.png --out MCBManagerIcon.iconset/icon_128x128.png
+          sips -z 256 256 assets/MCBManagerIcon.png --out MCBManagerIcon.iconset/icon_128x128@2x.png
+          sips -z 256 256 assets/MCBManagerIcon.png --out MCBManagerIcon.iconset/icon_256x256.png
+          sips -z 512 512 assets/MCBManagerIcon.png --out MCBManagerIcon.iconset/icon_256x256@2x.png
+          sips -z 512 512 assets/MCBManagerIcon.png --out MCBManagerIcon.iconset/icon_512x512.png
+          sips -z 1024 1024 assets/MCBManagerIcon.png --out MCBManagerIcon.iconset/icon_512x512@2x.png
+          iconutil -c icns MCBManagerIcon.iconset
+
       - name: Build macOS app bundle
         run: |
-          pyinstaller --windowed --name MCBManager --collect-all customtkinter main.py
+          pyinstaller --windowed --name MCBManager --icon MCBManagerIcon.icns --add-data "assets:assets" --collect-all customtkinter main.py
 
       - name: Create DMG
         run: |
