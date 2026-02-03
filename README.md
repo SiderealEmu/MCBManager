@@ -24,9 +24,9 @@ A desktop application for managing Minecraft Bedrock Dedicated Server addons. Pr
 
 Download the latest release for your platform from the [Releases](https://github.com/SiderealEmu/MCBManager/releases) page:
 
-- **Windows:** `MCBManager-windows.exe`
-- **macOS:** `MCBManager-macos.dmg`
-- **Linux:** `MCBManager-linux.bin`
+- **Windows:** `MCBManager-windows.exe` (Primary Development)
+- **macOS:** `MCBManager-macos.dmg` (Little Testing)
+- **Linux:** `MCBManager-linux.bin` (Untested)
 
 Simply download and run the executable. No installation required.
 
