@@ -1,10 +1,50 @@
 """Data models for Minecraft Bedrock addons."""
 
 import json
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import ClassVar, List, Optional, Set
+
+
+def strip_json_comments(text: str) -> str:
+    """Remove JavaScript-style comments from JSON text.
+
+    Handles:
+    - Single-line comments: // comment
+    - Multi-line comments: /* comment */
+
+    This is needed because some Minecraft addon manifests include comments
+    even though they're not valid JSON.
+    """
+    # Remove multi-line comments /* ... */
+    text = re.sub(r"/\*[\s\S]*?\*/", "", text)
+    # Remove single-line comments // ... (but not inside strings)
+    # This is a simplified approach that works for most manifest files
+    lines = text.split("\n")
+    cleaned_lines = []
+    for line in lines:
+        # Find // that's not inside a string
+        # Simple heuristic: if // appears and the quote count before it is even, it's a comment
+        idx = line.find("//")
+        if idx != -1:
+            # Count quotes before the //
+            before = line[:idx]
+            # If we're not inside a string (even number of unescaped quotes), strip the comment
+            quote_count = before.count('"') - before.count('\\"')
+            if quote_count % 2 == 0:
+                line = before
+        cleaned_lines.append(line)
+    return "\n".join(cleaned_lines)
+
+
+def load_json_with_comments(file_path: Path) -> dict:
+    """Load a JSON file that may contain JavaScript-style comments."""
+    with open(file_path, "r", encoding="utf-8") as f:
+        content = f.read()
+    cleaned = strip_json_comments(content)
+    return json.loads(cleaned)
 
 
 class PackType(Enum):
@@ -88,8 +128,7 @@ class Addon:
     ) -> Optional["Addon"]:
         """Create an Addon instance from a manifest.json file."""
         try:
-            with open(manifest_path, "r", encoding="utf-8") as f:
-                manifest = json.load(f)
+            manifest = load_json_with_comments(manifest_path)
 
             header = manifest.get("header", {})
             pack_dir = manifest_path.parent
@@ -134,15 +173,52 @@ class Addon:
     def detect_pack_type_from_manifest(manifest_path: Path) -> PackType:
         """Detect pack type from manifest.json content."""
         try:
-            with open(manifest_path, "r", encoding="utf-8") as f:
-                manifest = json.load(f)
+            manifest = load_json_with_comments(manifest_path)
 
             modules = manifest.get("modules", [])
             for module in modules:
                 module_type = module.get("type", "").lower()
-                if module_type in ("data", "script", "client_data"):
+                # Behavior pack module types
+                if module_type in ("data", "script", "client_data", "javascript"):
                     return PackType.BEHAVIOR
-                elif module_type == "resources":
+                # Resource pack module types
+                elif module_type in ("resources", "interface"):
+                    return PackType.RESOURCE
+
+            # Fallback: try to detect from folder name or path
+            pack_dir = manifest_path.parent
+            dir_name_lower = pack_dir.name.lower()
+
+            # Check for common naming patterns
+            if any(
+                pattern in dir_name_lower
+                for pattern in ("bp", "behavior", "behaviour", "_bp", "(bp)")
+            ):
+                return PackType.BEHAVIOR
+            if any(
+                pattern in dir_name_lower
+                for pattern in ("rp", "resource", "_rp", "(rp)")
+            ):
+                return PackType.RESOURCE
+
+            # Fallback: check for characteristic files/folders
+            # Behavior packs typically have: functions/, scripts/, entities/, loot_tables/
+            behavior_indicators = [
+                "functions",
+                "scripts",
+                "entities",
+                "loot_tables",
+                "trading",
+                "recipes",
+            ]
+            for indicator in behavior_indicators:
+                if (pack_dir / indicator).exists():
+                    return PackType.BEHAVIOR
+
+            # Resource packs typically have: textures/, sounds/, models/, font/
+            resource_indicators = ["textures", "sounds", "models", "font", "particles"]
+            for indicator in resource_indicators:
+                if (pack_dir / indicator).exists():
                     return PackType.RESOURCE
 
             return PackType.UNKNOWN

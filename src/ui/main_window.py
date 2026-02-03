@@ -432,10 +432,14 @@ class DefaultPacksDialog(ctk.CTkToplevel):
         self.transient(parent)
         self.grab_set()
 
-        # Center on parent
+        # Center on screen (more reliable than centering on parent at startup)
         self.update_idletasks()
-        x = parent.winfo_x() + (parent.winfo_width() - 500) // 2
-        y = parent.winfo_y() + (parent.winfo_height() - 250) // 2
+        screen_width = self.winfo_screenwidth()
+        screen_height = self.winfo_screenheight()
+        width = 500
+        height = 250
+        x = (screen_width - width) // 2
+        y = (screen_height - height) // 2
         self.geometry(f"+{x}+{y}")
 
         self._create_widgets()

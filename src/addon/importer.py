@@ -11,7 +11,7 @@ from typing import Callable, List, Optional, Tuple
 
 from ..config import config
 from ..server import get_server_version
-from .models import Addon, PackType
+from .models import Addon, PackType, load_json_with_comments
 
 # Progress callback type: (current_step, total_steps, message)
 ProgressCallback = Callable[[int, int, str], None]
@@ -284,36 +284,27 @@ class AddonImporter:
 
     @classmethod
     def _find_packs(cls, search_path: Path) -> List[Tuple[Path, PackType]]:
-        """Find all valid packs in a directory."""
-        packs = []
+        """Find all valid packs in a directory.
 
-        # Check if search_path itself is a pack
-        manifest = search_path / "manifest.json"
-        if manifest.exists():
+        Recursively searches for manifest.json files and returns the containing
+        directories as pack paths. Handles various archive structures including
+        nested folders at any depth.
+        """
+        packs = []
+        found_pack_paths = set()  # Avoid duplicates
+
+        # Use rglob to find all manifest.json files at any depth
+        for manifest in search_path.rglob("manifest.json"):
+            pack_dir = manifest.parent
+
+            # Skip if we've already found this pack
+            if pack_dir in found_pack_paths:
+                continue
+
             pack_type = Addon.detect_pack_type_from_manifest(manifest)
             if pack_type != PackType.UNKNOWN:
-                packs.append((search_path, pack_type))
-                return packs
-
-        # Search subdirectories
-        for item in search_path.iterdir():
-            if item.is_dir():
-                manifest = item / "manifest.json"
-                if manifest.exists():
-                    pack_type = Addon.detect_pack_type_from_manifest(manifest)
-                    if pack_type != PackType.UNKNOWN:
-                        packs.append((item, pack_type))
-                else:
-                    # Recurse one more level (for .mcaddon files that contain nested folders)
-                    for subitem in item.iterdir():
-                        if subitem.is_dir():
-                            sub_manifest = subitem / "manifest.json"
-                            if sub_manifest.exists():
-                                pack_type = Addon.detect_pack_type_from_manifest(
-                                    sub_manifest
-                                )
-                                if pack_type != PackType.UNKNOWN:
-                                    packs.append((subitem, pack_type))
+                packs.append((pack_dir, pack_type))
+                found_pack_paths.add(pack_dir)
 
         return packs
 
@@ -347,22 +338,21 @@ class AddonImporter:
         manifest_path = pack_path / "manifest.json"
         if manifest_path.exists():
             try:
-                with open(manifest_path, "r", encoding="utf-8") as f:
-                    manifest = json.load(f)
-                    min_engine_version = manifest.get("header", {}).get(
-                        "min_engine_version", [1, 0, 0]
+                manifest = load_json_with_comments(manifest_path)
+                min_engine_version = manifest.get("header", {}).get(
+                    "min_engine_version", [1, 0, 0]
+                )
+                pack_name_from_manifest = manifest.get("header", {}).get(
+                    "name", pack_path.name
+                )
+                _, compatibility_warning = cls.check_version_compatibility(
+                    min_engine_version
+                )
+                if compatibility_warning:
+                    # Prepend pack name to warning
+                    compatibility_warning = (
+                        f"{pack_name_from_manifest}: {compatibility_warning}"
                     )
-                    pack_name_from_manifest = manifest.get("header", {}).get(
-                        "name", pack_path.name
-                    )
-                    _, compatibility_warning = cls.check_version_compatibility(
-                        min_engine_version
-                    )
-                    if compatibility_warning:
-                        # Prepend pack name to warning
-                        compatibility_warning = (
-                            f"{pack_name_from_manifest}: {compatibility_warning}"
-                        )
             except (json.JSONDecodeError, IOError):
                 pass
 
@@ -378,10 +368,16 @@ class AddonImporter:
 
             if existing_manifest.exists() and new_manifest.exists():
                 try:
-                    with open(existing_manifest, "r") as f:
-                        existing_uuid = json.load(f).get("header", {}).get("uuid", "")
-                    with open(new_manifest, "r") as f:
-                        new_uuid = json.load(f).get("header", {}).get("uuid", "")
+                    existing_uuid = (
+                        load_json_with_comments(existing_manifest)
+                        .get("header", {})
+                        .get("uuid", "")
+                    )
+                    new_uuid = (
+                        load_json_with_comments(new_manifest)
+                        .get("header", {})
+                        .get("uuid", "")
+                    )
 
                     if existing_uuid == new_uuid:
                         # Same pack, update it
@@ -409,9 +405,8 @@ class AddonImporter:
         manifest = pack_path / "manifest.json"
         if manifest.exists():
             try:
-                with open(manifest, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    return data.get("header", {}).get("name", pack_path.name)
+                data = load_json_with_comments(manifest)
+                return data.get("header", {}).get("name", pack_path.name)
             except Exception:
                 pass
         return pack_path.name
