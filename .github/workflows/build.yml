@@ -3,7 +3,7 @@ name: Build and Release
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
   workflow_dispatch:
 
 jobs:
@@ -17,10 +17,10 @@ jobs:
             asset_name: MCBManager-windows.exe
           - os: macos-latest
             artifact_name: MCBManager
-            asset_name: MCBManager-macos
+            asset_name: MCBManager-macos.app
           - os: ubuntu-latest
             artifact_name: MCBManager
-            asset_name: MCBManager-linux
+            asset_name: MCBManager-linux.bin
 
     runs-on: ${{ matrix.os }}
 
@@ -31,8 +31,8 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-          cache: 'pip'
+          python-version: "3.11"
+          cache: "pip"
 
       - name: Install Linux dependencies
         if: matrix.os == 'ubuntu-latest'
