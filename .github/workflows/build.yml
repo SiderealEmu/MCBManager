@@ -25,6 +25,10 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
+      - name: Create Windows icon
+        run: |
+          python -c "from PIL import Image; img = Image.open('assets/MCBManagerIcon.png'); img.save('assets/MCBManagerIcon.ico', format='ICO', sizes=[(16,16), (32,32), (48,48), (64,64), (128,128), (256,256)])"
+
       - name: Build executable
         run: |
           pyinstaller --onefile --windowed --name MCBManager --icon assets/MCBManagerIcon.ico --add-data "assets;assets" --collect-all customtkinter main.py
