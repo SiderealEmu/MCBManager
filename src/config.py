@@ -19,6 +19,7 @@ class Config:
         "default_pack_uuids": [],
         "last_known_server_version": None,
         "auto_enable_after_import": False,
+        "check_for_updates": True,
     }
 
     def __init__(self):
@@ -204,6 +205,17 @@ class Config:
     def auto_enable_after_import(self, value: bool) -> None:
         """Set whether to automatically enable addons after import."""
         self._config["auto_enable_after_import"] = value
+        self.save()
+
+    @property
+    def check_for_updates(self) -> bool:
+        """Get whether to check for updates on startup."""
+        return self._config.get("check_for_updates", True)
+
+    @check_for_updates.setter
+    def check_for_updates(self, value: bool) -> None:
+        """Set whether to check for updates on startup."""
+        self._config["check_for_updates"] = value
         self.save()
 
 

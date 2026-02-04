@@ -11,6 +11,7 @@ from PIL import Image, ImageTk
 from ..addon import Addon, AddonManager
 from ..config import config
 from ..server import ServerMonitor, ServerProperties
+from ..updater import check_for_updates, check_for_updates_async, open_release_url, UpdateInfo
 from .addon_panel import AddonPanel
 from .server_panel import ServerPanel
 
@@ -77,6 +78,25 @@ class MainWindow(ctk.CTk):
 
         # Bind window close
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        # Check for updates after window is shown
+        if config.check_for_updates:
+            self.after(1000, self._check_for_updates)
+
+    def _check_for_updates(self) -> None:
+        """Check for updates in the background."""
+        check_for_updates_async(self._on_update_check_complete)
+
+    def _on_update_check_complete(self, update_info: UpdateInfo) -> None:
+        """Handle update check result (called from background thread)."""
+        if update_info and update_info.is_update_available:
+            # Schedule dialog on main thread
+            self.after(0, lambda: self._show_update_dialog(update_info))
+
+    def _show_update_dialog(self, update_info: UpdateInfo) -> None:
+        """Show the update available dialog."""
+        dialog = UpdateDialog(self, update_info)
+        self.wait_window(dialog)
 
     def _set_icon(self) -> None:
         """Set the window and taskbar icon."""
@@ -155,7 +175,8 @@ class MainWindow(ctk.CTk):
         self.addon_panel.grid(
             row=1, column=1, sticky="nsew", padx=(5, 10), pady=(5, 10)
         )
-        self.grid_rowconfigure(1, weight=1)
+        self.grid_rowconfigure(0, weight=0)  # Menu bar row doesn't expand
+        self.grid_rowconfigure(1, weight=1)  # Panel row expands
 
     def _check_default_packs_detection(self) -> None:
         """Check if we need to detect default packs on first launch."""
@@ -338,7 +359,7 @@ class SettingsDialog(ctk.CTkToplevel):
         self.changed = False
 
         self.title("Settings")
-        self.geometry("450x450")
+        self.geometry("450x520")
         self.resizable(False, False)
 
         # Set window icon
@@ -351,7 +372,7 @@ class SettingsDialog(ctk.CTkToplevel):
         # Center on parent
         self.update_idletasks()
         x = parent.winfo_x() + (parent.winfo_width() - 450) // 2
-        y = parent.winfo_y() + (parent.winfo_height() - 300) // 2
+        y = parent.winfo_y() + (parent.winfo_height() - 520) // 2
         self.geometry(f"+{x}+{y}")
 
         self._create_widgets()
@@ -408,6 +429,28 @@ class SettingsDialog(ctk.CTkToplevel):
         )
         auto_enable_checkbox.pack(anchor="w", padx=20)
 
+        # Updates section
+        updates_label = ctk.CTkLabel(
+            self, text="Updates:", font=ctk.CTkFont(weight="bold")
+        )
+        updates_label.pack(anchor="w", padx=20, pady=(20, 5))
+
+        self.check_updates_var = ctk.BooleanVar(value=config.check_for_updates)
+        check_updates_checkbox = ctk.CTkCheckBox(
+            self,
+            text="Check for updates on startup",
+            variable=self.check_updates_var,
+        )
+        check_updates_checkbox.pack(anchor="w", padx=20)
+
+        self.check_now_btn = ctk.CTkButton(
+            self,
+            text="Check for Updates Now",
+            width=200,
+            command=self._check_for_updates,
+        )
+        self.check_now_btn.pack(anchor="w", padx=20, pady=(5, 0))
+
         # Default packs section
         default_label = ctk.CTkLabel(
             self, text="Default Packs:", font=ctk.CTkFont(weight="bold")
@@ -458,6 +501,7 @@ class SettingsDialog(ctk.CTkToplevel):
         new_path = self.path_entry.get().strip()
         new_theme = self.theme_var.get()
         new_auto_enable = self.auto_enable_var.get()
+        new_check_updates = self.check_updates_var.get()
 
         if new_path != config.server_path:
             if new_path:
@@ -475,6 +519,9 @@ class SettingsDialog(ctk.CTkToplevel):
         if new_auto_enable != config.auto_enable_after_import:
             config.auto_enable_after_import = new_auto_enable
 
+        if new_check_updates != config.check_for_updates:
+            config.check_for_updates = new_check_updates
+
         self.destroy()
 
     def _reset_default_packs(self) -> None:
@@ -491,6 +538,37 @@ class SettingsDialog(ctk.CTkToplevel):
                 "Reset Complete",
                 "Default packs detection has been reset.\n"
                 "The detection dialog will appear when you restart the app.",
+            )
+
+    def _check_for_updates(self) -> None:
+        """Manually check for updates."""
+        self.check_now_btn.configure(text="Checking...", state="disabled")
+        self.update()
+
+        update_info = check_for_updates()
+
+        self.check_now_btn.configure(text="Check for Updates Now", state="normal")
+
+        if update_info is None:
+            messagebox.showerror(
+                "Update Check Failed",
+                "Could not check for updates.\n"
+                "Please check your internet connection.",
+            )
+        elif update_info.is_update_available:
+            result = messagebox.askyesno(
+                "Update Available",
+                f"A new version is available!\n\n"
+                f"Current version: {update_info.current_version}\n"
+                f"Latest version: {update_info.latest_version}\n\n"
+                "Would you like to open the download page?",
+            )
+            if result:
+                open_release_url(update_info.release_url)
+        else:
+            messagebox.showinfo(
+                "Up to Date",
+                f"You are running the latest version ({update_info.current_version}).",
             )
 
 
@@ -601,4 +679,84 @@ class DefaultPacksDialog(ctk.CTkToplevel):
         """Skip detection - user has custom packs already."""
         # Don't mark any packs as default, just mark detection as done
         config.default_packs_detected = True
+        self.destroy()
+
+
+class UpdateDialog(ctk.CTkToplevel):
+    """Dialog for showing update availability."""
+
+    def __init__(self, parent, update_info: UpdateInfo):
+        super().__init__(parent)
+
+        self.update_info = update_info
+
+        self.title("Update Available")
+        self.geometry("450x250")
+        self.resizable(False, False)
+
+        # Set window icon
+        set_dialog_icon(self)
+
+        # Make modal
+        self.transient(parent)
+        self.grab_set()
+
+        # Center on parent
+        self.update_idletasks()
+        x = parent.winfo_x() + (parent.winfo_width() - 450) // 2
+        y = parent.winfo_y() + (parent.winfo_height() - 250) // 2
+        self.geometry(f"+{x}+{y}")
+
+        self._create_widgets()
+
+    def _create_widgets(self) -> None:
+        """Create dialog widgets."""
+        # Title
+        title_label = ctk.CTkLabel(
+            self,
+            text="Update Available!",
+            font=ctk.CTkFont(size=18, weight="bold"),
+        )
+        title_label.pack(pady=(20, 10))
+
+        # Version info
+        version_text = (
+            f"A new version of MCBManager is available.\n\n"
+            f"Current version: {self.update_info.current_version}\n"
+            f"Latest version: {self.update_info.latest_version}"
+        )
+        version_label = ctk.CTkLabel(
+            self,
+            text=version_text,
+            font=ctk.CTkFont(size=13),
+            justify="center",
+        )
+        version_label.pack(pady=(10, 20))
+
+        # Buttons
+        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
+        btn_frame.pack(fill="x", padx=40, pady=20)
+
+        # Download button
+        download_btn = ctk.CTkButton(
+            btn_frame,
+            text="Download Update",
+            width=150,
+            command=self._open_download,
+        )
+        download_btn.pack(side="left", padx=10)
+
+        # Later button
+        later_btn = ctk.CTkButton(
+            btn_frame,
+            text="Remind Me Later",
+            width=150,
+            fg_color="gray",
+            command=self.destroy,
+        )
+        later_btn.pack(side="right", padx=10)
+
+    def _open_download(self) -> None:
+        """Open the download page and close dialog."""
+        open_release_url(self.update_info.release_url)
         self.destroy()

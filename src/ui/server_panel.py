@@ -44,7 +44,7 @@ class ServerPanel(ctk.CTkFrame):
         title_label = ctk.CTkLabel(
             self, text="Server Status", font=ctk.CTkFont(size=18, weight="bold")
         )
-        title_label.pack(pady=(15, 10))
+        title_label.pack(pady=(2, 10))
 
         # Status indicator
         self.status_frame = ctk.CTkFrame(self)

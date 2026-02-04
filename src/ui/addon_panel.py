@@ -79,7 +79,7 @@ class AddonPanel(ctk.CTkFrame):
 
         # Header with title and buttons
         header_frame = ctk.CTkFrame(self, fg_color="transparent")
-        header_frame.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 5))
+        header_frame.grid(row=0, column=0, sticky="ew", padx=10, pady=(2, 5))
         header_frame.grid_columnconfigure(1, weight=1)
 
         title_label = ctk.CTkLabel(
