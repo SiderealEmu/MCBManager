@@ -23,6 +23,7 @@ MCBManager does its best with detecting and importing addons. However, not all a
 - Version compatibility checking
 - Remote server management
 - Manage multiple servers
+- Addon Performance Metrics (This might be a stretch, but it's worth exploring)
 
 ### Pipe Dreams
 If this takes off and does well, I'll look into adapting this project into an actual Minecraft Bedrock Server Launcher. Meaning that it can spin up servers, Manage Servers beyond just addons (Users, Worlds, etc.), Logging, Statistics, and more!
