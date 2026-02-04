@@ -29,14 +29,6 @@ jobs:
         run: |
           python -c "from PIL import Image; img = Image.open('assets/MCBManagerIcon.png'); img.save('assets/MCBManagerIcon.ico', format='ICO', sizes=[(16,16), (32,32), (48,48), (64,64), (128,128), (256,256)])"
 
-      - name: Set version from tag
-        if: startsWith(github.ref, 'refs/tags/')
-        run: |
-          $version = "${{ github.ref_name }}" -replace '^v', ''
-          (Get-Content src/__init__.py) -replace '__version__ = ".*"', "__version__ = `"$version`"" | Set-Content src/__init__.py
-          Write-Host "Version set to $version"
-        shell: pwsh
-
       - name: Build executable
         run: |
           pyinstaller --onefile --windowed --name MCBManager --icon assets/MCBManagerIcon.ico --add-data "assets;assets" --collect-all customtkinter main.py
@@ -70,14 +62,6 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
-      - name: Set version from tag
-        if: startsWith(github.ref, 'refs/tags/')
-        run: |
-          version="${{ github.ref_name }}"
-          version="${version#v}"
-          sed -i "s/__version__ = \".*\"/__version__ = \"$version\"/" src/__init__.py
-          echo "Version set to $version"
-
       - name: Build executable
         run: |
           pyinstaller --onefile --windowed --name MCBManager --add-data "assets:assets" --collect-all customtkinter main.py
@@ -106,14 +90,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pyinstaller
-
-      - name: Set version from tag
-        if: startsWith(github.ref, 'refs/tags/')
-        run: |
-          version="${{ github.ref_name }}"
-          version="${version#v}"
-          sed -i '' "s/__version__ = \".*\"/__version__ = \"$version\"/" src/__init__.py
-          echo "Version set to $version"
 
       - name: Create macOS icon
         run: |
