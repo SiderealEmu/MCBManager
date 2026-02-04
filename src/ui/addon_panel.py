@@ -50,6 +50,12 @@ class AddonPanel(ctk.CTkFrame):
         self._resource_packs: List[Addon] = []
         self._search_debounce_id: Optional[str] = None
 
+        # Collapse state for sections (per tab)
+        self._behavior_enabled_collapsed: bool = False
+        self._behavior_disabled_collapsed: bool = False
+        self._resource_enabled_collapsed: bool = False
+        self._resource_disabled_collapsed: bool = False
+
         self._create_widgets()
 
     def _is_server_running(self) -> bool:
@@ -277,11 +283,13 @@ class AddonPanel(ctk.CTkFrame):
             self.behavior_scroll,
             self.behavior_empty_msg,
             filtered_behavior,
+            PackType.BEHAVIOR,
         )
         self._update_pack_list(
             self.resource_scroll,
             self.resource_empty_msg,
             filtered_resource,
+            PackType.RESOURCE,
         )
 
     def _on_search_change(self, event=None) -> None:
@@ -315,8 +323,12 @@ class AddonPanel(ctk.CTkFrame):
         scroll_frame: ctk.CTkScrollableFrame,
         empty_message: str,
         packs: List[Addon],
+        pack_type: PackType,
     ) -> None:
         """Update a pack list frame."""
+        # Temporarily disable scrolling updates for smoother rebuilding
+        scroll_frame.configure(width=scroll_frame.winfo_width())
+
         # Clear existing widgets
         for widget in scroll_frame.winfo_children():
             widget.destroy()
@@ -336,17 +348,158 @@ class AddonPanel(ctk.CTkFrame):
             empty_label.pack(pady=50)
             return
 
-        # Create pack cards
-        for i, pack in enumerate(packs):
-            card = AddonCard(
+        # Separate enabled and disabled packs
+        enabled_packs = []
+        disabled_packs = []
+
+        for pack in packs:
+            if self.selected_world and self.addon_manager.is_addon_enabled_in_world(
+                pack, self.selected_world
+            ):
+                position = self.addon_manager.get_addon_position(
+                    pack, self.selected_world
+                )
+                enabled_packs.append((pack, position if position is not None else 999))
+            else:
+                disabled_packs.append(pack)
+
+        # Sort enabled packs by position (load order)
+        enabled_packs.sort(key=lambda x: x[1])
+        total_enabled = len(enabled_packs)
+        total_disabled = len(disabled_packs)
+
+        # Get collapse states for this pack type
+        if pack_type == PackType.BEHAVIOR:
+            enabled_collapsed = self._behavior_enabled_collapsed
+            disabled_collapsed = self._behavior_disabled_collapsed
+        else:
+            enabled_collapsed = self._resource_enabled_collapsed
+            disabled_collapsed = self._resource_disabled_collapsed
+
+        row = 0
+
+        # Summary header showing total counts
+        summary_frame = ctk.CTkFrame(scroll_frame, fg_color="transparent")
+        summary_frame.grid(row=row, column=0, sticky="ew", pady=(5, 10), padx=5)
+
+        summary_label = ctk.CTkLabel(
+            summary_frame,
+            text=f"Total: {len(packs)}  |  Enabled: {total_enabled}  |  Disabled: {total_disabled}",
+            font=ctk.CTkFont(size=11),
+            text_color="gray",
+        )
+        summary_label.pack(side="left")
+        row += 1
+
+        # Create section header for enabled packs if any exist
+        if enabled_packs:
+            enabled_header = self._create_collapsible_header(
                 scroll_frame,
-                pack,
-                self.selected_world,
-                self.addon_manager,
-                on_toggle=self._on_addon_toggle,
-                on_delete=self._on_addon_delete,
+                f"Enabled ({total_enabled}) - Load Order",
+                enabled_collapsed,
+                lambda: self._toggle_section(pack_type, "enabled"),
             )
-            card.grid(row=i, column=0, sticky="ew", pady=5, padx=5)
+            enabled_header.grid(row=row, column=0, sticky="ew", pady=(5, 5), padx=5)
+            row += 1
+
+            if not enabled_collapsed:
+                for pack, position in enabled_packs:
+                    card = AddonCard(
+                        scroll_frame,
+                        pack,
+                        self.selected_world,
+                        self.addon_manager,
+                        on_toggle=self._on_addon_toggle,
+                        on_delete=self._on_addon_delete,
+                        on_move_up=self._on_move_up,
+                        on_move_down=self._on_move_down,
+                        position=position,
+                        total_enabled=total_enabled,
+                    )
+                    card.grid(row=row, column=0, sticky="ew", pady=5, padx=5)
+                    row += 1
+
+        # Section for disabled packs
+        if disabled_packs:
+            disabled_header = self._create_collapsible_header(
+                scroll_frame,
+                f"Disabled ({total_disabled})",
+                disabled_collapsed,
+                lambda: self._toggle_section(pack_type, "disabled"),
+            )
+            disabled_header.grid(row=row, column=0, sticky="ew", pady=(15, 5), padx=5)
+            row += 1
+
+            if not disabled_collapsed:
+                for pack in sorted(disabled_packs, key=lambda x: x.name.lower()):
+                    card = AddonCard(
+                        scroll_frame,
+                        pack,
+                        self.selected_world,
+                        self.addon_manager,
+                        on_toggle=self._on_addon_toggle,
+                        on_delete=self._on_addon_delete,
+                    )
+                    card.grid(row=row, column=0, sticky="ew", pady=5, padx=5)
+                    row += 1
+
+        # Force layout update after all widgets are created
+        scroll_frame.update_idletasks()
+
+    def _create_collapsible_header(
+        self,
+        parent,
+        text: str,
+        is_collapsed: bool,
+        on_click: Callable,
+    ) -> ctk.CTkFrame:
+        """Create a clickable collapsible section header."""
+        header_frame = ctk.CTkFrame(parent, fg_color="transparent", cursor="hand2")
+
+        # Collapse/expand indicator
+        indicator = "\u25B6" if is_collapsed else "\u25BC"  # Right or down triangle
+        indicator_label = ctk.CTkLabel(
+            header_frame,
+            text=indicator,
+            font=ctk.CTkFont(size=10),
+            width=15,
+        )
+        indicator_label.pack(side="left", padx=(0, 5))
+
+        # Section title
+        title_label = ctk.CTkLabel(
+            header_frame,
+            text=text,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            anchor="w",
+        )
+        title_label.pack(side="left")
+
+        # Make the entire header clickable
+        def handle_click(event):
+            on_click()
+
+        header_frame.bind("<Button-1>", handle_click)
+        indicator_label.bind("<Button-1>", handle_click)
+        title_label.bind("<Button-1>", handle_click)
+
+        return header_frame
+
+    def _toggle_section(self, pack_type: PackType, section: str) -> None:
+        """Toggle the collapsed state of a section."""
+        if pack_type == PackType.BEHAVIOR:
+            if section == "enabled":
+                self._behavior_enabled_collapsed = not self._behavior_enabled_collapsed
+            else:
+                self._behavior_disabled_collapsed = not self._behavior_disabled_collapsed
+        else:
+            if section == "enabled":
+                self._resource_enabled_collapsed = not self._resource_enabled_collapsed
+            else:
+                self._resource_disabled_collapsed = not self._resource_disabled_collapsed
+
+        # Refresh the lists to apply the change
+        self._update_filtered_lists()
 
     def _on_world_change(self, world: str) -> None:
         """Handle world selection change."""
@@ -405,6 +558,36 @@ class AddonPanel(ctk.CTkFrame):
                 messagebox.showinfo("Success", f"'{addon.name}' has been deleted.")
             else:
                 messagebox.showerror("Error", "Failed to delete addon.")
+
+    def _on_move_up(self, addon: Addon) -> None:
+        """Handle move up button click (increase priority)."""
+        if self._is_server_running():
+            self._show_server_running_warning()
+            return
+
+        if not self.selected_world:
+            return
+
+        success = self.addon_manager.move_addon_priority(
+            addon, self.selected_world, -1
+        )
+        if success:
+            self.refresh()
+
+    def _on_move_down(self, addon: Addon) -> None:
+        """Handle move down button click (decrease priority)."""
+        if self._is_server_running():
+            self._show_server_running_warning()
+            return
+
+        if not self.selected_world:
+            return
+
+        success = self.addon_manager.move_addon_priority(
+            addon, self.selected_world, +1
+        )
+        if success:
+            self.refresh()
 
     def _show_import_dialog(self) -> None:
         """Show the import addon dialog."""
@@ -584,6 +767,10 @@ class AddonCard(ctk.CTkFrame):
         addon_manager: AddonManager,
         on_toggle: Optional[Callable] = None,
         on_delete: Optional[Callable] = None,
+        on_move_up: Optional[Callable] = None,
+        on_move_down: Optional[Callable] = None,
+        position: Optional[int] = None,
+        total_enabled: int = 0,
     ):
         super().__init__(parent)
 
@@ -592,17 +779,27 @@ class AddonCard(ctk.CTkFrame):
         self.addon_manager = addon_manager
         self.on_toggle = on_toggle
         self.on_delete = on_delete
+        self.on_move_up = on_move_up
+        self.on_move_down = on_move_down
+        self.position = position
+        self.total_enabled = total_enabled
 
         self._create_widgets()
 
     def _create_widgets(self) -> None:
         """Create card widgets."""
-        self.grid_columnconfigure(1, weight=1)
+        # Use pack layout for more stable rendering during scroll
+        self.configure(height=70)
+        self.pack_propagate(False)
+
+        # Main container using pack for stability
+        main_container = ctk.CTkFrame(self, fg_color="transparent")
+        main_container.pack(fill="both", expand=True, padx=5, pady=5)
 
         # Icon placeholder
-        icon_frame = ctk.CTkFrame(self, width=50, height=50, corner_radius=5)
-        icon_frame.grid(row=0, column=0, rowspan=2, padx=10, pady=10)
-        icon_frame.grid_propagate(False)
+        icon_frame = ctk.CTkFrame(main_container, width=50, height=50, corner_radius=5)
+        icon_frame.pack(side="left", padx=(5, 10), pady=5)
+        icon_frame.pack_propagate(False)
 
         # Try to load pack icon from cache
         if self.addon.icon_path and self.addon.icon_path.exists():
@@ -615,35 +812,77 @@ class AddonCard(ctk.CTkFrame):
         else:
             self._show_default_icon(icon_frame)
 
-        # Pack name
+        # Controls frame (pack on right side first)
+        controls_frame = ctk.CTkFrame(main_container, fg_color="transparent")
+        controls_frame.pack(side="right", padx=(10, 5), pady=5)
+
+        # Info container in the middle (takes remaining space)
+        info_container = ctk.CTkFrame(main_container, fg_color="transparent")
+        info_container.pack(side="left", fill="both", expand=True, pady=5)
+
+        # Pack name with position indicator for enabled packs
+        name_text = self.addon.name
+        if self.position is not None:
+            # Show position as 1-indexed for user display
+            name_text = f"#{self.position + 1}  {self.addon.name}"
+
         name_label = ctk.CTkLabel(
-            self,
-            text=self.addon.name,
+            info_container,
+            text=name_text,
             font=ctk.CTkFont(size=14, weight="bold"),
             anchor="w",
         )
-        name_label.grid(row=0, column=1, sticky="sw", pady=(10, 0))
+        name_label.pack(anchor="sw", pady=(5, 0))
 
         # Pack info
         info_text = f"v{self.addon.version_string}"
         if self.addon.description:
-            desc = self.addon.description[:60]
-            if len(self.addon.description) > 60:
+            desc = self.addon.description[:50]
+            if len(self.addon.description) > 50:
                 desc += "..."
             info_text += f" - {desc}"
 
         info_label = ctk.CTkLabel(
-            self,
+            info_container,
             text=info_text,
             font=ctk.CTkFont(size=11),
             text_color="gray",
             anchor="w",
         )
-        info_label.grid(row=1, column=1, sticky="nw", pady=(0, 10))
+        info_label.pack(anchor="nw", pady=(0, 5))
 
-        # Controls frame
-        controls_frame = ctk.CTkFrame(self, fg_color="transparent")
-        controls_frame.grid(row=0, column=2, rowspan=2, padx=10, pady=10)
+        # Priority controls (only for enabled packs with move callbacks)
+        if self.position is not None and (self.on_move_up or self.on_move_down):
+            priority_frame = ctk.CTkFrame(controls_frame, fg_color="transparent")
+            priority_frame.pack(side="left", padx=(0, 15))
+
+            # Up button (disabled if already at top)
+            can_move_up = self.position > 0
+            self.up_btn = ctk.CTkButton(
+                priority_frame,
+                text="\u25B2",  # Unicode up triangle
+                width=30,
+                height=24,
+                font=ctk.CTkFont(size=10),
+                command=self._on_move_up_click,
+                state="normal" if can_move_up else "disabled",
+                fg_color="#555555" if can_move_up else "#333333",
+            )
+            self.up_btn.pack(side="left", padx=2)
+
+            # Down button (disabled if already at bottom)
+            can_move_down = self.position < self.total_enabled - 1
+            self.down_btn = ctk.CTkButton(
+                priority_frame,
+                text="\u25BC",  # Unicode down triangle
+                width=30,
+                height=24,
+                font=ctk.CTkFont(size=10),
+                command=self._on_move_down_click,
+                state="normal" if can_move_down else "disabled",
+                fg_color="#555555" if can_move_down else "#333333",
+            )
+            self.down_btn.pack(side="left", padx=2)
 
         # Enable/Disable switch
         is_enabled = False
@@ -694,3 +933,13 @@ class AddonCard(ctk.CTkFrame):
         """Handle delete button click."""
         if self.on_delete:
             self.on_delete(self.addon)
+
+    def _on_move_up_click(self) -> None:
+        """Handle move up button click."""
+        if self.on_move_up:
+            self.on_move_up(self.addon)
+
+    def _on_move_down_click(self) -> None:
+        """Handle move down button click."""
+        if self.on_move_down:
+            self.on_move_down(self.addon)

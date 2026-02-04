@@ -222,6 +222,114 @@ class AddonManager:
 
         return False
 
+    def get_addon_position(self, addon: Addon, world_name: str) -> Optional[int]:
+        """Get the load order position of an addon in a world.
+
+        Returns 0-indexed position (0 = highest priority), or None if not enabled.
+        """
+        if addon.pack_type == PackType.BEHAVIOR:
+            filename = "world_behavior_packs.json"
+        else:
+            filename = "world_resource_packs.json"
+
+        worlds_path = config.get_worlds_path()
+        if not worlds_path:
+            return None
+
+        pack_file = worlds_path / world_name / filename
+        if not pack_file.exists():
+            return None
+
+        try:
+            with open(pack_file, "r", encoding="utf-8") as f:
+                packs = json.load(f)
+                for i, pack in enumerate(packs):
+                    if pack.get("pack_id") == addon.uuid:
+                        return i
+        except (json.JSONDecodeError, IOError):
+            pass
+
+        return None
+
+    def get_enabled_pack_count(self, world_name: str, pack_type: PackType) -> int:
+        """Get the total count of enabled packs for a world."""
+        if pack_type == PackType.BEHAVIOR:
+            filename = "world_behavior_packs.json"
+        else:
+            filename = "world_resource_packs.json"
+
+        worlds_path = config.get_worlds_path()
+        if not worlds_path:
+            return 0
+
+        pack_file = worlds_path / world_name / filename
+        if not pack_file.exists():
+            return 0
+
+        try:
+            with open(pack_file, "r", encoding="utf-8") as f:
+                packs = json.load(f)
+                return len(packs)
+        except (json.JSONDecodeError, IOError):
+            return 0
+
+    def move_addon_priority(self, addon: Addon, world_name: str, direction: int) -> bool:
+        """Move an addon's priority position.
+
+        Args:
+            addon: The addon to move
+            world_name: The world to modify
+            direction: -1 to move up (higher priority), +1 to move down (lower priority)
+
+        Returns:
+            True if move was successful, False otherwise
+        """
+        if addon.pack_type == PackType.BEHAVIOR:
+            filename = "world_behavior_packs.json"
+        else:
+            filename = "world_resource_packs.json"
+
+        worlds_path = config.get_worlds_path()
+        if not worlds_path:
+            return False
+
+        pack_file = worlds_path / world_name / filename
+        if not pack_file.exists():
+            return False
+
+        try:
+            with open(pack_file, "r", encoding="utf-8") as f:
+                packs = json.load(f)
+        except (json.JSONDecodeError, IOError):
+            return False
+
+        # Find current position
+        current_index = None
+        for i, pack in enumerate(packs):
+            if pack.get("pack_id") == addon.uuid:
+                current_index = i
+                break
+
+        if current_index is None:
+            return False  # Pack not found
+
+        new_index = current_index + direction
+
+        # Bounds check
+        if new_index < 0 or new_index >= len(packs):
+            return False  # Can't move beyond bounds
+
+        # Swap positions
+        packs[current_index], packs[new_index] = packs[new_index], packs[current_index]
+
+        # Save the file
+        try:
+            with open(pack_file, "w", encoding="utf-8") as f:
+                json.dump(packs, f, indent=2)
+            return True
+        except IOError:
+            return False
+
     def delete_addon(self, addon: Addon) -> bool:
         """Delete an addon from the server."""
         import shutil

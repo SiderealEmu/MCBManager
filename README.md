@@ -4,17 +4,21 @@
 
 A desktop application for managing Minecraft Bedrock Dedicated Server addons. Provides a GUI for importing, enabling, disabling, and deleting behavior and resource packs. No longer do you have to unzip addons manually, input pack_id or versions! Just download addons, put them all in a folder, and MCBManager will handle the rest!
 
+## IMPORTANT NOTE
+
+MCBManager does its best with detecting and importing addons. However, not all addons are created equal. Currently, addons from CurseForge are the most supported. I am actively working on improving the detection and import process for other sources.
+
 ## Features
 
 - Import addons from `.mcaddon`, `.mcpack`, and `.zip` files
 - Enable/disable behavior and resource packs per world
+- Pack load order prioritization - Reorder enabled packs to control which addons take precedence
 - Bulk operations for managing multiple addons
 - Server status monitoring
 - Search and filter installed addons
 
 ### Future Plans
 
-- Manual Resource Pack Prioritization
 - Remote server management
 - Version compatibility checking
 - Manage multiple servers
