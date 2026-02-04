@@ -51,10 +51,15 @@ class AddonPanel(ctk.CTkFrame):
         self._search_debounce_id: Optional[str] = None
 
         # Collapse state for sections (per tab)
+        self._behavior_missing_deps_collapsed: bool = False
         self._behavior_enabled_collapsed: bool = False
         self._behavior_disabled_collapsed: bool = False
+        self._resource_missing_deps_collapsed: bool = False
         self._resource_enabled_collapsed: bool = False
         self._resource_disabled_collapsed: bool = False
+
+        # Cache for installed UUIDs (refreshed when pack lists change)
+        self._installed_uuids: set = set()
 
         self._create_widgets()
 
@@ -276,6 +281,10 @@ class AddonPanel(ctk.CTkFrame):
 
     def _update_filtered_lists(self) -> None:
         """Update pack lists with current search filter."""
+        # Update installed UUIDs cache
+        all_addons = self._behavior_packs + self._resource_packs
+        self._installed_uuids = {addon.uuid for addon in all_addons}
+
         filtered_behavior = self._filter_packs(self._behavior_packs)
         filtered_resource = self._filter_packs(self._resource_packs)
 
@@ -348,12 +357,16 @@ class AddonPanel(ctk.CTkFrame):
             empty_label.pack(pady=50)
             return
 
-        # Separate enabled and disabled packs
+        # Separate packs into categories: missing deps, enabled, disabled
+        missing_deps_packs = []
         enabled_packs = []
         disabled_packs = []
 
         for pack in packs:
-            if self.selected_world and self.addon_manager.is_addon_enabled_in_world(
+            # Check if pack has missing dependencies
+            if pack.has_missing_dependencies(self._installed_uuids):
+                missing_deps_packs.append(pack)
+            elif self.selected_world and self.addon_manager.is_addon_enabled_in_world(
                 pack, self.selected_world
             ):
                 position = self.addon_manager.get_addon_position(
@@ -365,14 +378,17 @@ class AddonPanel(ctk.CTkFrame):
 
         # Sort enabled packs by position (load order)
         enabled_packs.sort(key=lambda x: x[1])
+        total_missing_deps = len(missing_deps_packs)
         total_enabled = len(enabled_packs)
         total_disabled = len(disabled_packs)
 
         # Get collapse states for this pack type
         if pack_type == PackType.BEHAVIOR:
+            missing_deps_collapsed = self._behavior_missing_deps_collapsed
             enabled_collapsed = self._behavior_enabled_collapsed
             disabled_collapsed = self._behavior_disabled_collapsed
         else:
+            missing_deps_collapsed = self._resource_missing_deps_collapsed
             enabled_collapsed = self._resource_enabled_collapsed
             disabled_collapsed = self._resource_disabled_collapsed
 
@@ -382,14 +398,44 @@ class AddonPanel(ctk.CTkFrame):
         summary_frame = ctk.CTkFrame(scroll_frame, fg_color="transparent")
         summary_frame.grid(row=row, column=0, sticky="ew", pady=(5, 10), padx=5)
 
+        summary_parts = [f"Total: {len(packs)}", f"Enabled: {total_enabled}", f"Disabled: {total_disabled}"]
+        if total_missing_deps > 0:
+            summary_parts.append(f"Missing Deps: {total_missing_deps}")
+
         summary_label = ctk.CTkLabel(
             summary_frame,
-            text=f"Total: {len(packs)}  |  Enabled: {total_enabled}  |  Disabled: {total_disabled}",
+            text="  |  ".join(summary_parts),
             font=ctk.CTkFont(size=11),
             text_color="gray",
         )
         summary_label.pack(side="left")
         row += 1
+
+        # Section for packs with missing dependencies (at top, highlighted)
+        if missing_deps_packs:
+            missing_header = self._create_collapsible_header(
+                scroll_frame,
+                f"Missing Dependencies ({total_missing_deps})",
+                missing_deps_collapsed,
+                lambda: self._toggle_section(pack_type, "missing_deps"),
+                header_color="#D32F2F",
+            )
+            missing_header.grid(row=row, column=0, sticky="ew", pady=(5, 5), padx=5)
+            row += 1
+
+            if not missing_deps_collapsed:
+                for pack in sorted(missing_deps_packs, key=lambda x: x.name.lower()):
+                    card = AddonCard(
+                        scroll_frame,
+                        pack,
+                        self.selected_world,
+                        self.addon_manager,
+                        on_toggle=self._on_addon_toggle,
+                        on_delete=self._on_addon_delete,
+                        installed_uuids=self._installed_uuids,
+                    )
+                    card.grid(row=row, column=0, sticky="ew", pady=5, padx=5)
+                    row += 1
 
         # Create section header for enabled packs if any exist
         if enabled_packs:
@@ -399,7 +445,7 @@ class AddonPanel(ctk.CTkFrame):
                 enabled_collapsed,
                 lambda: self._toggle_section(pack_type, "enabled"),
             )
-            enabled_header.grid(row=row, column=0, sticky="ew", pady=(5, 5), padx=5)
+            enabled_header.grid(row=row, column=0, sticky="ew", pady=(15 if missing_deps_packs else 5, 5), padx=5)
             row += 1
 
             if not enabled_collapsed:
@@ -415,6 +461,7 @@ class AddonPanel(ctk.CTkFrame):
                         on_move_down=self._on_move_down,
                         position=position,
                         total_enabled=total_enabled,
+                        installed_uuids=self._installed_uuids,
                     )
                     card.grid(row=row, column=0, sticky="ew", pady=5, padx=5)
                     row += 1
@@ -439,6 +486,7 @@ class AddonPanel(ctk.CTkFrame):
                         self.addon_manager,
                         on_toggle=self._on_addon_toggle,
                         on_delete=self._on_addon_delete,
+                        installed_uuids=self._installed_uuids,
                     )
                     card.grid(row=row, column=0, sticky="ew", pady=5, padx=5)
                     row += 1
@@ -452,6 +500,7 @@ class AddonPanel(ctk.CTkFrame):
         text: str,
         is_collapsed: bool,
         on_click: Callable,
+        header_color: Optional[str] = None,
     ) -> ctk.CTkFrame:
         """Create a clickable collapsible section header."""
         header_frame = ctk.CTkFrame(parent, fg_color="transparent", cursor="hand2")
@@ -463,6 +512,7 @@ class AddonPanel(ctk.CTkFrame):
             text=indicator,
             font=ctk.CTkFont(size=10),
             width=15,
+            text_color=header_color,
         )
         indicator_label.pack(side="left", padx=(0, 5))
 
@@ -472,6 +522,7 @@ class AddonPanel(ctk.CTkFrame):
             text=text,
             font=ctk.CTkFont(size=12, weight="bold"),
             anchor="w",
+            text_color=header_color,
         )
         title_label.pack(side="left")
 
@@ -488,12 +539,16 @@ class AddonPanel(ctk.CTkFrame):
     def _toggle_section(self, pack_type: PackType, section: str) -> None:
         """Toggle the collapsed state of a section."""
         if pack_type == PackType.BEHAVIOR:
-            if section == "enabled":
+            if section == "missing_deps":
+                self._behavior_missing_deps_collapsed = not self._behavior_missing_deps_collapsed
+            elif section == "enabled":
                 self._behavior_enabled_collapsed = not self._behavior_enabled_collapsed
             else:
                 self._behavior_disabled_collapsed = not self._behavior_disabled_collapsed
         else:
-            if section == "enabled":
+            if section == "missing_deps":
+                self._resource_missing_deps_collapsed = not self._resource_missing_deps_collapsed
+            elif section == "enabled":
                 self._resource_enabled_collapsed = not self._resource_enabled_collapsed
             else:
                 self._resource_disabled_collapsed = not self._resource_disabled_collapsed
@@ -516,6 +571,18 @@ class AddonPanel(ctk.CTkFrame):
 
         if not self.selected_world:
             messagebox.showwarning("Warning", "Please select a world first.")
+            return
+
+        # Check for missing dependencies when trying to enable
+        if enabled and addon.has_missing_dependencies(self._installed_uuids):
+            missing = addon.get_missing_dependencies(self._installed_uuids)
+            messagebox.showwarning(
+                "Missing Dependencies",
+                f"Cannot enable '{addon.name}' because it has {len(missing)} missing "
+                f"dependenc{'y' if len(missing) == 1 else 'ies'}.\n\n"
+                "Please install the required dependencies first.",
+            )
+            self.refresh()  # Reset the toggle switch
             return
 
         if enabled:
@@ -807,6 +874,7 @@ class AddonCard(ctk.CTkFrame):
         on_move_down: Optional[Callable] = None,
         position: Optional[int] = None,
         total_enabled: int = 0,
+        installed_uuids: Optional[set] = None,
     ):
         super().__init__(parent)
 
@@ -819,14 +887,29 @@ class AddonCard(ctk.CTkFrame):
         self.on_move_down = on_move_down
         self.position = position
         self.total_enabled = total_enabled
+        self.installed_uuids = installed_uuids or self._get_installed_uuids()
 
         self._create_widgets()
 
     def _create_widgets(self) -> None:
         """Create card widgets."""
+        # Check version compatibility
+        is_compatible = self.addon.is_compatible
+
+        # Check for missing dependencies
+        has_missing_deps = self.addon.has_missing_dependencies(self.installed_uuids)
+        missing_deps_count = len(self.addon.get_missing_dependencies(self.installed_uuids))
+
+        # Determine if addon has issues (incompatible or missing dependencies)
+        has_issues = not is_compatible or has_missing_deps
+
         # Use pack layout for more stable rendering during scroll
         self.configure(height=70)
         self.pack_propagate(False)
+
+        # Set border color for addons with issues
+        if has_issues:
+            self.configure(border_width=2, border_color="#D32F2F")
 
         # Main container using pack for stability
         main_container = ctk.CTkFrame(self, fg_color="transparent")
@@ -862,27 +945,42 @@ class AddonCard(ctk.CTkFrame):
             # Show position as 1-indexed for user display
             name_text = f"#{self.position + 1}  {self.addon.name}"
 
+        # Use red text color for addons with issues
+        name_color = "#D32F2F" if has_issues else None
+
         name_label = ctk.CTkLabel(
             info_container,
             text=name_text,
             font=ctk.CTkFont(size=14, weight="bold"),
             anchor="w",
+            text_color=name_color,
         )
         name_label.pack(anchor="sw", pady=(5, 0))
 
-        # Pack info
+        # Pack info - show warnings for issues
         info_text = f"v{self.addon.version_string}"
-        if self.addon.description:
+        if not is_compatible and has_missing_deps:
+            # Both issues
+            info_text += f" (requires MC {self.addon.min_engine_version_string}, {missing_deps_count} missing dep(s))"
+        elif not is_compatible:
+            info_text += f" (requires MC {self.addon.min_engine_version_string})"
+        elif has_missing_deps:
+            info_text += f" ({missing_deps_count} missing dependency)"
+            if missing_deps_count > 1:
+                info_text = info_text.replace("dependency)", "dependencies)")
+        elif self.addon.description:
             desc = self.addon.description[:50]
             if len(self.addon.description) > 50:
                 desc += "..."
             info_text += f" - {desc}"
 
+        info_color = "#D32F2F" if has_issues else "gray"
+
         info_label = ctk.CTkLabel(
             info_container,
             text=info_text,
             font=ctk.CTkFont(size=11),
-            text_color="gray",
+            text_color=info_color,
             anchor="w",
         )
         info_label.pack(anchor="nw", pady=(0, 5))
@@ -927,15 +1025,31 @@ class AddonCard(ctk.CTkFrame):
                 self.addon, self.world
             )
 
+        # Disable switch for addons with missing dependencies
+        switch_state = "disabled" if has_missing_deps else "normal"
+
         self.switch_var = ctk.BooleanVar(value=is_enabled)
         self.switch = ctk.CTkSwitch(
             controls_frame,
-            text="Enabled",
+            text="Enabled" if not has_missing_deps else "Missing Deps",
             variable=self.switch_var,
             command=self._on_switch_toggle,
             width=40,
+            state=switch_state,
         )
         self.switch.pack(side="left", padx=(0, 10))
+
+        # Info button
+        self.info_btn = ctk.CTkButton(
+            controls_frame,
+            text="Info",
+            width=50,
+            height=28,
+            fg_color="#555555",
+            hover_color="#666666",
+            command=self._on_info_click,
+        )
+        self.info_btn.pack(side="left", padx=(0, 5))
 
         # Delete button
         self.delete_btn = ctk.CTkButton(
@@ -948,6 +1062,14 @@ class AddonCard(ctk.CTkFrame):
             command=self._on_delete_click,
         )
         self.delete_btn.pack(side="left")
+
+    def _get_installed_uuids(self) -> set:
+        """Get set of all installed addon UUIDs."""
+        all_addons = (
+            self.addon_manager.get_behavior_packs()
+            + self.addon_manager.get_resource_packs()
+        )
+        return {addon.uuid for addon in all_addons}
 
     def _show_default_icon(self, frame: ctk.CTkFrame) -> None:
         """Show default pack icon."""
@@ -979,3 +1101,12 @@ class AddonCard(ctk.CTkFrame):
         """Handle move down button click."""
         if self.on_move_down:
             self.on_move_down(self.addon)
+
+    def _on_info_click(self) -> None:
+        """Handle info button click."""
+        from .addon_details_dialog import AddonDetailsDialog
+
+        dialog = AddonDetailsDialog(
+            self.winfo_toplevel(), self.addon, self.addon_manager
+        )
+        self.winfo_toplevel().wait_window(dialog)

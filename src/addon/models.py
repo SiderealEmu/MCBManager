@@ -71,6 +71,14 @@ class Addon:
     enabled: bool = False
     icon_path: Optional[Path] = None
     min_engine_version: List[int] = field(default_factory=lambda: [1, 0, 0])
+    # Additional manifest fields
+    author: str = ""
+    url: str = ""
+    license: str = ""
+    dependencies: List[dict] = field(default_factory=list)
+    subpacks: List[dict] = field(default_factory=list)
+    capabilities: List[str] = field(default_factory=list)
+    format_version: str = ""
 
     @property
     def version_string(self) -> str:
@@ -103,6 +111,43 @@ class Addon:
         default_uuids = self.get_default_pack_uuids()
         return self.uuid in default_uuids
 
+    @property
+    def is_compatible(self) -> bool:
+        """Check if this addon is compatible with the server version.
+
+        Returns True if compatible or if server version cannot be determined.
+        Returns False if addon's min_engine_version exceeds server version.
+        """
+        from ..server import get_server_version
+        from ..config import config
+
+        # Try to get live server version first
+        server_version = get_server_version()
+
+        # If server is offline, try to use cached version from config
+        if server_version is None:
+            cached_version = config.last_known_server_version
+            if cached_version:
+                try:
+                    server_version = [int(p) for p in cached_version.split(".")[:3]]
+                except (ValueError, AttributeError):
+                    server_version = None
+
+        if server_version is None:
+            # Can't determine server version, assume compatible
+            return True
+
+        # Compare versions
+        min_ver = self.min_engine_version + [0] * (3 - len(self.min_engine_version))
+        srv_ver = server_version + [0] * (3 - len(server_version))
+
+        for a, b in zip(min_ver, srv_ver):
+            if a < b:
+                return True
+            if a > b:
+                return False
+        return True
+
     @staticmethod
     def _is_placeholder_name(name: str) -> bool:
         """Check if a name is a placeholder that should be replaced with folder name."""
@@ -131,6 +176,7 @@ class Addon:
             manifest = load_json_with_comments(manifest_path)
 
             header = manifest.get("header", {})
+            metadata = manifest.get("metadata", {})
             pack_dir = manifest_path.parent
 
             uuid = header.get("uuid", "")
@@ -155,6 +201,35 @@ class Addon:
                     icon_path = potential_icon
                     break
 
+            # Extract additional manifest fields
+            # Author: try header.author, then metadata.authors[0]
+            author = header.get("author", "")
+            if not author:
+                authors = metadata.get("authors", [])
+                if authors and isinstance(authors, list) and len(authors) > 0:
+                    # Authors can be strings or dicts with "name" field
+                    first_author = authors[0]
+                    if isinstance(first_author, str):
+                        author = first_author
+                    elif isinstance(first_author, dict):
+                        author = first_author.get("name", "")
+
+            # URL: try header.url, then metadata.url
+            url = header.get("url", "") or metadata.get("url", "")
+
+            # License: try header.license, then metadata.license
+            license_str = header.get("license", "") or metadata.get("license", "")
+
+            # Dependencies, subpacks, capabilities from root
+            dependencies = manifest.get("dependencies", [])
+            subpacks = manifest.get("subpacks", [])
+            capabilities = manifest.get("capabilities", [])
+
+            # Format version from root
+            format_version = manifest.get("format_version", "")
+            if isinstance(format_version, (int, float)):
+                format_version = str(format_version)
+
             return cls(
                 uuid=uuid,
                 name=name,
@@ -165,6 +240,13 @@ class Addon:
                 enabled=enabled,
                 icon_path=icon_path,
                 min_engine_version=min_engine_version,
+                author=author,
+                url=url,
+                license=license_str,
+                dependencies=dependencies,
+                subpacks=subpacks,
+                capabilities=capabilities,
+                format_version=format_version,
             )
         except (json.JSONDecodeError, IOError, KeyError):
             return None
@@ -224,6 +306,42 @@ class Addon:
             return PackType.UNKNOWN
         except (json.JSONDecodeError, IOError):
             return PackType.UNKNOWN
+
+    def get_missing_dependencies(self, installed_uuids: Set[str]) -> List[str]:
+        """Get list of missing dependency UUIDs.
+
+        Args:
+            installed_uuids: Set of UUIDs of all installed addons.
+
+        Returns:
+            List of dependency UUIDs that are not installed.
+            Excludes @minecraft/* script module dependencies.
+        """
+        missing = []
+        for dep in self.dependencies:
+            dep_uuid = dep.get("uuid", "")
+            module_name = dep.get("module_name", "")
+
+            # Skip @minecraft/* script module dependencies
+            if module_name.startswith("@minecraft/") or dep_uuid.startswith("@minecraft/"):
+                continue
+
+            # Check if this dependency is installed
+            if dep_uuid and dep_uuid not in installed_uuids:
+                missing.append(dep_uuid)
+
+        return missing
+
+    def has_missing_dependencies(self, installed_uuids: Set[str]) -> bool:
+        """Check if this addon has any missing dependencies.
+
+        Args:
+            installed_uuids: Set of UUIDs of all installed addons.
+
+        Returns:
+            True if any dependencies are missing, False otherwise.
+        """
+        return len(self.get_missing_dependencies(installed_uuids)) > 0
 
     def to_pack_entry(self) -> dict:
         """Convert to world pack JSON entry format."""

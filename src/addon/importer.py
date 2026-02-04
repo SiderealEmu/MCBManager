@@ -601,7 +601,8 @@ class AddonImporter:
                 result = cls.import_addon(addon_file, progress_callback=None)
                 if result.success:
                     imported.extend(result.imported_packs)
-                    compatibility_warnings.extend(result.warnings)
+                    if result.warnings:
+                        compatibility_warnings.extend(result.warnings)
                 else:
                     errors.append(f"{addon_file.name}: {result.message}")
 
