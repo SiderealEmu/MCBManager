@@ -1,11 +1,13 @@
 """Import addon dialog."""
 
+import sys
 import threading
 from pathlib import Path
 from tkinter import filedialog, messagebox
 from typing import Optional
 
 import customtkinter as ctk
+from PIL import Image, ImageTk
 
 from ..addon import AddonImporter
 
@@ -24,6 +26,9 @@ class ImportDialog(ctk.CTkToplevel):
         self.geometry("550x350")
         self.resizable(False, False)
 
+        # Set window icon
+        self._set_icon()
+
         # Make modal
         self.transient(parent)
         self.grab_set()
@@ -35,6 +40,29 @@ class ImportDialog(ctk.CTkToplevel):
         self.geometry(f"+{x}+{y}")
 
         self._create_widgets()
+
+    def _set_icon(self) -> None:
+        """Set the window icon."""
+        # Determine base path (handles PyInstaller bundled apps)
+        if getattr(sys, "frozen", False):
+            base_path = Path(sys._MEIPASS)
+        else:
+            base_path = Path(__file__).parent.parent.parent
+
+        icon_path = base_path / "assets" / "MCBManagerIcon.png"
+        ico_path = base_path / "assets" / "MCBManagerIcon.ico"
+
+        try:
+            # On Windows, use .ico for window icon
+            if ico_path.exists():
+                self.after(200, lambda: self.iconbitmap(str(ico_path)))
+            if icon_path.exists():
+                icon_image = Image.open(icon_path)
+                icon_photo = ImageTk.PhotoImage(icon_image)
+                self._icon_photo = icon_photo  # Keep reference
+                self.iconphoto(True, icon_photo)
+        except Exception:
+            pass  # Silently fail if icon cannot be loaded
 
     def _create_widgets(self) -> None:
         """Create dialog widgets."""

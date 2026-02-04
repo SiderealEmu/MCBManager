@@ -198,10 +198,28 @@ class AddonImporter:
             report_progress(5, 5, "Finalizing...")
 
             if imported:
-                pack_names = [f"{name} ({ptype.value})" for name, ptype in imported]
-                message = f"Successfully imported: {', '.join(pack_names)}"
+                # Build a clean, organized message
+                behavior_packs = [name for name, ptype in imported if ptype == PackType.BEHAVIOR]
+                resource_packs = [name for name, ptype in imported if ptype == PackType.RESOURCE]
+
+                lines = [f"Successfully imported {len(imported)} pack(s):\n"]
+
+                if behavior_packs:
+                    lines.append("Behavior Packs:")
+                    for name in behavior_packs:
+                        lines.append(f"  • {name}")
+
+                if resource_packs:
+                    if behavior_packs:
+                        lines.append("")  # Add spacing
+                    lines.append("Resource Packs:")
+                    for name in resource_packs:
+                        lines.append(f"  • {name}")
+
                 if errors:
-                    message += f"\nWarnings: {'; '.join(errors)}"
+                    lines.append(f"\nWarnings: {'; '.join(errors)}")
+
+                message = "\n".join(lines)
                 return ImportResult(
                     True, message, imported, warnings=compatibility_warnings
                 )
@@ -606,10 +624,28 @@ class AddonImporter:
         report_progress(4, 4, "Finalizing...")
 
         if imported:
-            pack_names = [f"{name} ({ptype.value})" for name, ptype in imported]
-            message = f"Successfully imported: {', '.join(pack_names)}"
+            # Build a clean, organized message
+            behavior_packs = [name for name, ptype in imported if ptype == PackType.BEHAVIOR]
+            resource_packs = [name for name, ptype in imported if ptype == PackType.RESOURCE]
+
+            lines = [f"Successfully imported {len(imported)} pack(s):\n"]
+
+            if behavior_packs:
+                lines.append("Behavior Packs:")
+                for name in behavior_packs:
+                    lines.append(f"  • {name}")
+
+            if resource_packs:
+                if behavior_packs:
+                    lines.append("")  # Add spacing
+                lines.append("Resource Packs:")
+                for name in resource_packs:
+                    lines.append(f"  • {name}")
+
             if errors:
-                message += f"\nWarnings: {'; '.join(errors)}"
+                lines.append(f"\nWarnings: {'; '.join(errors)}")
+
+            message = "\n".join(lines)
             return ImportResult(
                 True, message, imported, warnings=compatibility_warnings
             )

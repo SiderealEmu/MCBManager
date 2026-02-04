@@ -601,19 +601,20 @@ class AddonPanel(ctk.CTkFrame):
         self.winfo_toplevel().wait_window(dialog)
 
         if dialog.imported:
-            self._refresh()
-
             # Auto-enable imported packs if setting is enabled
             if config.auto_enable_after_import and self.selected_world:
                 self._auto_enable_imported_packs(dialog.imported_packs)
+            else:
+                self._refresh()
 
     def _auto_enable_imported_packs(self, imported_packs: list) -> None:
         """Automatically enable imported packs in the selected world."""
-        if not imported_packs or not self.selected_world:
-            return
-
-        # Refresh to get updated pack lists
+        # First refresh to get the newly imported packs
         self.addon_manager.refresh()
+
+        if not imported_packs or not self.selected_world:
+            self.refresh()
+            return
 
         # Get all packs
         all_packs = (
@@ -621,9 +622,8 @@ class AddonPanel(ctk.CTkFrame):
             + self.addon_manager.get_resource_packs()
         )
 
-        # Create a map of folder names to addons
+        # Enable imported packs
         # imported_packs is List[Tuple[folder_name, PackType]]
-        enabled_count = 0
         for folder_name, pack_type in imported_packs:
             # Find the addon by matching folder name
             for addon in all_packs:
@@ -631,12 +631,11 @@ class AddonPanel(ctk.CTkFrame):
                     if not self.addon_manager.is_addon_enabled_in_world(
                         addon, self.selected_world
                     ):
-                        if self.addon_manager.enable_addon(addon, self.selected_world):
-                            enabled_count += 1
+                        self.addon_manager.enable_addon(addon, self.selected_world)
                     break
 
-        if enabled_count > 0:
-            self.refresh()
+        # Update the UI
+        self.refresh()
 
     def _refresh(self) -> None:
         """Refresh data from parent."""
