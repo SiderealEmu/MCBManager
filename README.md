@@ -14,6 +14,7 @@ A desktop application for managing Minecraft Bedrock Dedicated Server addons. Pr
 
 ### Future Plans
 
+- Manual Resource Pack Prioritization
 - Remote server management
 - Version compatibility checking
 - Manage multiple servers
