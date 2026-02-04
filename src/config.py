@@ -18,6 +18,7 @@ class Config:
         "default_packs_detected": False,
         "default_pack_uuids": [],
         "last_known_server_version": None,
+        "auto_enable_after_import": False,
     }
 
     def __init__(self):
@@ -192,6 +193,17 @@ class Config:
     def last_known_server_version(self, value: Optional[str]) -> None:
         """Set the last known server version."""
         self._config["last_known_server_version"] = value
+        self.save()
+
+    @property
+    def auto_enable_after_import(self) -> bool:
+        """Get whether to automatically enable addons after import."""
+        return self._config.get("auto_enable_after_import", False)
+
+    @auto_enable_after_import.setter
+    def auto_enable_after_import(self, value: bool) -> None:
+        """Set whether to automatically enable addons after import."""
+        self._config["auto_enable_after_import"] = value
         self.save()
 
 

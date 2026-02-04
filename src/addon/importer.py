@@ -157,10 +157,16 @@ class AddonImporter:
             else:
                 return ImportResult(False, "File is not a valid archive")
 
-            # Handle .mcaddon files - they contain .mcpack files that need extraction
-            if file_path.suffix.lower() == ".mcaddon":
-                report_progress(2, 5, "Extracting nested packs...")
-                cls._extract_nested_mcpacks(temp_path, base_name)
+            report_progress(2, 5, "Processing nested packs...")
+
+            # Check for any .mcpack files that need extraction
+            # This handles .mcaddon files (which contain .mcpack files) as well as
+            # .zip files that may contain .mcpack files
+            mcpack_files = list(temp_path.rglob("*.mcpack"))
+            if mcpack_files:
+                success, error_msg = cls._extract_nested_mcpacks(temp_path, base_name)
+                if not success:
+                    return ImportResult(False, error_msg)
 
             report_progress(3, 5, "Scanning for packs...")
 
@@ -217,12 +223,24 @@ class AddonImporter:
             zf.extractall(dest_path)
 
     @classmethod
-    def _extract_nested_mcpacks(cls, extract_path: Path, base_name: str) -> None:
+    def _extract_nested_mcpacks(
+        cls, extract_path: Path, base_name: str, max_depth: int = 3
+    ) -> Tuple[bool, Optional[str]]:
         """Extract nested .mcpack files found in .mcaddon archives.
 
         .mcaddon files are zip archives containing .mcpack files, which are also
         zip archives containing the actual pack contents. This method finds and
-        extracts all .mcpack files.
+        extracts all .mcpack files recursively, handling cases where .mcpack files
+        contain other .mcpack files.
+
+        Args:
+            extract_path: Path to search for .mcpack files
+            base_name: Base name to use for generic pack names
+            max_depth: Maximum extraction depth (default 3)
+
+        Returns:
+            Tuple of (success, error_message). If nesting is too deep, returns
+            (False, error_message).
         """
         # Generic names that should be replaced with the addon name
         generic_names = {
@@ -243,44 +261,75 @@ class AddonImporter:
             "pack",
         }
 
-        # Find all .mcpack files in the extracted content
-        mcpack_files = list(extract_path.rglob("*.mcpack"))
+        current_depth = 0
 
-        for mcpack_file in mcpack_files:
-            if not cls._is_archive(mcpack_file):
-                continue
+        # Keep extracting until no more .mcpack files are found
+        while True:
+            # Find all .mcpack files in the extracted content
+            mcpack_files = list(extract_path.rglob("*.mcpack"))
 
-            # Determine the folder name for extraction
-            pack_stem = mcpack_file.stem.lower()
+            if not mcpack_files:
+                break
 
-            # Check if this is a generic name that should be renamed
-            if pack_stem in generic_names:
-                # Determine pack type suffix based on the generic name
-                if any(x in pack_stem for x in ["resource", "rp"]):
-                    folder_name = f"{base_name}_RP"
-                elif any(x in pack_stem for x in ["behavior", "behaviour", "bp"]):
-                    folder_name = f"{base_name}_BP"
+            # Check depth limit
+            current_depth += 1
+            if current_depth > max_depth:
+                return (
+                    False,
+                    f"Addon has too many nested layers (>{max_depth}). "
+                    f"This file may be corrupted or improperly packaged.",
+                )
+
+            for mcpack_file in mcpack_files:
+                if not cls._is_archive(mcpack_file):
+                    # Not a valid archive, remove it to avoid confusion
+                    try:
+                        mcpack_file.unlink()
+                    except Exception:
+                        pass
+                    continue
+
+                # Determine the folder name for extraction
+                pack_stem = mcpack_file.stem.lower()
+
+                # Check if this is a generic name that should be renamed
+                if pack_stem in generic_names:
+                    # Determine pack type suffix based on the generic name
+                    if any(x in pack_stem for x in ["resource", "rp"]):
+                        folder_name = f"{base_name}_RP"
+                    elif any(x in pack_stem for x in ["behavior", "behaviour", "bp"]):
+                        folder_name = f"{base_name}_BP"
+                    else:
+                        folder_name = f"{base_name}_{mcpack_file.stem}"
                 else:
-                    folder_name = f"{base_name}_{mcpack_file.stem}"
-            else:
-                folder_name = mcpack_file.stem
+                    folder_name = mcpack_file.stem
 
-            # Create extraction directory
-            extract_dest = mcpack_file.parent / folder_name
-            extract_dest.mkdir(parents=True, exist_ok=True)
+                # Create extraction directory
+                extract_dest = mcpack_file.parent / folder_name
 
-            # Extract the .mcpack
-            try:
-                cls._extract_archive(mcpack_file, extract_dest)
-            except Exception:
-                # If extraction fails, skip this pack
-                continue
+                # Handle case where destination already exists
+                if extract_dest.exists():
+                    counter = 1
+                    while extract_dest.exists():
+                        extract_dest = mcpack_file.parent / f"{folder_name}_{counter}"
+                        counter += 1
 
-            # Remove the .mcpack file after extraction
-            try:
-                mcpack_file.unlink()
-            except Exception:
-                pass
+                extract_dest.mkdir(parents=True, exist_ok=True)
+
+                # Extract the .mcpack
+                try:
+                    cls._extract_archive(mcpack_file, extract_dest)
+                except Exception:
+                    # If extraction fails, skip this pack
+                    pass
+
+                # Remove the .mcpack file after extraction
+                try:
+                    mcpack_file.unlink()
+                except Exception:
+                    pass
+
+        return True, None
 
     @classmethod
     def _find_packs(cls, search_path: Path) -> List[Tuple[Path, PackType]]:

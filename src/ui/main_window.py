@@ -312,7 +312,7 @@ class SettingsDialog(ctk.CTkToplevel):
         self.changed = False
 
         self.title("Settings")
-        self.geometry("450x380")
+        self.geometry("450x450")
         self.resizable(False, False)
 
         # Make modal
@@ -365,6 +365,20 @@ class SettingsDialog(ctk.CTkToplevel):
         )
         light_radio.pack(side="left")
 
+        # Import settings section
+        import_label = ctk.CTkLabel(
+            self, text="Import Settings:", font=ctk.CTkFont(weight="bold")
+        )
+        import_label.pack(anchor="w", padx=20, pady=(20, 5))
+
+        self.auto_enable_var = ctk.BooleanVar(value=config.auto_enable_after_import)
+        auto_enable_checkbox = ctk.CTkCheckBox(
+            self,
+            text="Automatically enable addons after import",
+            variable=self.auto_enable_var,
+        )
+        auto_enable_checkbox.pack(anchor="w", padx=20)
+
         # Default packs section
         default_label = ctk.CTkLabel(
             self, text="Default Packs:", font=ctk.CTkFont(weight="bold")
@@ -414,6 +428,7 @@ class SettingsDialog(ctk.CTkToplevel):
         """Save settings."""
         new_path = self.path_entry.get().strip()
         new_theme = self.theme_var.get()
+        new_auto_enable = self.auto_enable_var.get()
 
         if new_path != config.server_path:
             if new_path:
@@ -427,6 +442,9 @@ class SettingsDialog(ctk.CTkToplevel):
         if new_theme != config.theme:
             config.theme = new_theme
             ctk.set_appearance_mode(new_theme)
+
+        if new_auto_enable != config.auto_enable_after_import:
+            config.auto_enable_after_import = new_auto_enable
 
         self.destroy()
 

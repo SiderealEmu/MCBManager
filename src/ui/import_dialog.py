@@ -18,6 +18,7 @@ class ImportDialog(ctk.CTkToplevel):
 
         self.imported = False
         self.selected_path: Optional[str] = None
+        self.imported_packs = []  # List of (folder_name, PackType) tuples
 
         self.title("Import Addon")
         self.geometry("550x350")
@@ -293,6 +294,7 @@ class ImportDialog(ctk.CTkToplevel):
                 text_color="#00C853",  # Green
             )
             self.imported = True
+            self.imported_packs = result.imported_packs  # Store for auto-enable
 
             # Show compatibility warnings if any
             if result.warnings:
