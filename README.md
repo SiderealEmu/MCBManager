@@ -16,11 +16,11 @@ MCBManager does its best with detecting and importing addons. However, not all a
 - Bulk operations for managing multiple addons
 - Server status monitoring
 - Search and filter installed addons
+- Addon Dependency Detection
+- Addon/server Version compatibility checking
 
 ### Future Plans
 
-- Addon Dependency Detection and Management
-- Version compatibility checking
 - Remote server management
 - Manage multiple servers
 - Addon Performance Metrics (This might be a stretch, but it's worth exploring)
