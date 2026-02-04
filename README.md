@@ -6,7 +6,7 @@ A desktop application for managing Minecraft Bedrock Dedicated Server addons. Pr
 
 ## IMPORTANT NOTE
 
-MCBManager does its best with detecting and importing addons. However, not all addons are created equal. Currently, addons from CurseForge are the most supported. I am actively working on improving the detection and import process for other sources. If you encounter issues with importing addons, please report them on the [GitHub repository](https://github.com/SiderealEmu/MCBManager/issues).
+MCBManager does its best with detecting and importing addons. However, not all addons are created equal. Currently, addons from CurseForge are the most supported. I am actively working on improving the detection and import process for other sources. If you encounter issues with importing addons, please report them on the [Issues Page](https://github.com/SiderealEmu/MCBManager/issues).
 
 ## Features
 
