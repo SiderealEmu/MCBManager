@@ -15,6 +15,29 @@ from .addon_panel import AddonPanel
 from .server_panel import ServerPanel
 
 
+def set_dialog_icon(dialog: ctk.CTkToplevel) -> None:
+    """Set the MCBManager icon for a dialog window."""
+    # Determine base path (handles PyInstaller bundled apps)
+    if getattr(sys, "frozen", False):
+        base_path = Path(sys._MEIPASS)
+    else:
+        base_path = Path(__file__).parent.parent.parent
+
+    icon_path = base_path / "assets" / "MCBManagerIcon.png"
+    ico_path = base_path / "assets" / "MCBManagerIcon.ico"
+
+    try:
+        if ico_path.exists():
+            dialog.after(200, lambda: dialog.iconbitmap(str(ico_path)))
+        if icon_path.exists():
+            icon_image = Image.open(icon_path)
+            icon_photo = ImageTk.PhotoImage(icon_image)
+            dialog._icon_photo = icon_photo  # Keep reference
+            dialog.iconphoto(True, icon_photo)
+    except Exception:
+        pass  # Silently fail if icon cannot be loaded
+
+
 class MainWindow(ctk.CTk):
     """Main application window."""
 
@@ -209,6 +232,9 @@ class ServerPathDialog(ctk.CTkToplevel):
         self.geometry("500x200")
         self.resizable(False, False)
 
+        # Set window icon
+        set_dialog_icon(self)
+
         # Make modal
         self.transient(parent)
         self.grab_set()
@@ -314,6 +340,9 @@ class SettingsDialog(ctk.CTkToplevel):
         self.title("Settings")
         self.geometry("450x450")
         self.resizable(False, False)
+
+        # Set window icon
+        set_dialog_icon(self)
 
         # Make modal
         self.transient(parent)
@@ -476,6 +505,9 @@ class DefaultPacksDialog(ctk.CTkToplevel):
         self.title("Default Packs Detection")
         self.geometry("500x250")
         self.resizable(False, False)
+
+        # Set window icon
+        set_dialog_icon(self)
 
         # Make modal
         self.transient(parent)
