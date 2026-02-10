@@ -1,9 +1,8 @@
 """Server properties parsing."""
 
-from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict
 
-from ..config import config
+from .filesystem import server_fs
 
 
 class ServerProperties:
@@ -18,25 +17,22 @@ class ServerProperties:
         self._properties = {}
         self._loaded = False
 
-        if not config.is_server_configured():
+        if not server_fs.is_configured():
             return False
 
-        properties_path = Path(config.server_path) / "server.properties"
-
-        if not properties_path.exists():
+        if not server_fs.exists("server.properties"):
             return False
 
         try:
-            with open(properties_path, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if line and not line.startswith("#"):
-                        if "=" in line:
-                            key, value = line.split("=", 1)
-                            self._properties[key.strip()] = value.strip()
+            content = server_fs.read_text("server.properties")
+            for line in content.splitlines():
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    key, value = line.split("=", 1)
+                    self._properties[key.strip()] = value.strip()
             self._loaded = True
             return True
-        except IOError:
+        except Exception:
             return False
 
     def reload(self) -> bool:

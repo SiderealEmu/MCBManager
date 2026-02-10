@@ -18,10 +18,10 @@ MCBManager does its best with detecting and importing addons. However, not all a
 - Search and filter installed addons
 - Addon Dependency Detection
 - Addon/server Version compatibility checking
+- Local and SFTP server file management (Windows, macOS, Linux)
 
 ### Future Plans
 
-- Remote server management
 - Manage multiple servers
 - Addon Performance Metrics (This might be a stretch, but it's worth exploring)
 
@@ -30,8 +30,10 @@ If this takes off and does well, I'll look into adapting this project into an ac
 
 ## Requirements
 
-- Minecraft Bedrock Dedicated Server installed locally
-- **Note:** MCBManager is currently intended to run on the same machine as your Bedrock server. Remote server management is not supported yet.
+- Python 3.8+ (when running from source)
+- Bedrock server files accessible either:
+  - Locally on the same machine, or
+  - Over SFTP (host, credentials, and remote server root path)
 
 ### Download (Recommended)
 
@@ -74,8 +76,9 @@ python main.py
 ## Getting Started
 
 1. Launch MCBManager
-2. On first run, a setup wizard will guide you through configuring the path to your Bedrock Dedicated Server
-3. Start importing and managing your addons
+2. On first run, configure a server connection (Local folder path or SFTP)
+3. Confirmation window will popup asking for confirmation if you've already installed custom addons
+4. Start importing and managing your addons
 
 ## Configuration
 

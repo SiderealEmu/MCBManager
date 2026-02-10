@@ -1,16 +1,17 @@
 """Main application window."""
 
 import sys
+import threading
 from pathlib import Path
 from tkinter import filedialog, messagebox
-from typing import Optional
+from typing import Callable, Dict, List, Optional
 
 import customtkinter as ctk
 from PIL import Image, ImageTk
 
-from ..addon import Addon, AddonManager
+from ..addon import Addon, AddonManager, PackType
 from ..config import config
-from ..server import ServerMonitor, ServerProperties
+from ..server import ServerMonitor, ServerProperties, server_fs
 from ..updater import check_for_updates, check_for_updates_async, open_release_url, UpdateInfo
 from .addon_panel import AddonPanel
 from .server_panel import ServerPanel
@@ -61,6 +62,10 @@ class MainWindow(ctk.CTk):
         self.addon_manager = AddonManager()
         self.server_monitor = ServerMonitor()
         self.server_properties = ServerProperties()
+        self._refresh_lock = threading.Lock()
+        self._refresh_in_progress = False
+        self._refresh_pending = False
+        self._refresh_callbacks: List[Callable[[], None]] = []
 
         # Build UI
         self._create_layout()
@@ -70,9 +75,7 @@ class MainWindow(ctk.CTk):
         if config.is_server_configured():
             # Load default pack UUIDs first, before refreshing addon lists
             Addon.set_default_pack_uuids(set(config.default_pack_uuids))
-            self._load_server_data()
-            # Check if we need to detect default packs (first launch)
-            self._check_default_packs_detection()
+            self._load_server_data(on_complete=self._check_default_packs_detection)
         else:
             self._prompt_server_path()
 
@@ -189,9 +192,6 @@ class MainWindow(ctk.CTk):
 
     def _show_default_packs_dialog(self) -> None:
         """Show dialog asking about existing custom packs."""
-        # Ensure addon manager has the latest pack list
-        self.addon_manager.refresh()
-
         dialog = DefaultPacksDialog(self, self.addon_manager)
         self.wait_window(dialog)
 
@@ -202,30 +202,115 @@ class MainWindow(ctk.CTk):
         self.addon_panel.refresh()
 
     def _prompt_server_path(self) -> None:
-        """Prompt the user to select the server directory."""
+        """Prompt the user to configure the server connection."""
         dialog = ServerPathDialog(self)
         self.wait_window(dialog)
 
         if dialog.result:
-            config.server_path = dialog.result
-            self._load_server_data()
-            # Check for default packs after server is configured
-            self._check_default_packs_detection()
+            server_fs.close()
+            self._load_server_data(on_complete=self._check_default_packs_detection)
 
-    def _load_server_data(self) -> None:
-        """Load server data and refresh UI."""
-        self.server_properties.load()
-        self.addon_manager.refresh()
-        self.server_panel.refresh()
-        self.addon_panel.refresh()
+    def _set_refresh_ui_state(self, is_refreshing: bool) -> None:
+        """Update refresh button states to reflect background refresh work."""
+        if hasattr(self, "addon_panel") and hasattr(self.addon_panel, "refresh_btn"):
+            self.addon_panel.refresh_btn.configure(
+                text="Refreshing..." if is_refreshing else "Refresh",
+                state="disabled" if is_refreshing else "normal",
+            )
+        if hasattr(self, "server_panel") and hasattr(self.server_panel, "refresh_btn"):
+            self.server_panel.refresh_btn.configure(
+                text="Refreshing..." if is_refreshing else "Refresh Status",
+                state="disabled" if is_refreshing else "normal",
+            )
 
-    def _refresh_data(self) -> None:
-        """Refresh all data."""
-        self._load_server_data()
+    def _load_server_data(self, on_complete: Optional[Callable[[], None]] = None) -> None:
+        """Queue a full data refresh in the background."""
+        self._refresh_data(on_complete=on_complete)
+
+    def _refresh_data(self, on_complete: Optional[Callable[[], None]] = None) -> None:
+        """Refresh all data in a background worker."""
+        if not config.is_server_configured():
+            return
+
+        should_start_worker = False
+        with self._refresh_lock:
+            if on_complete is not None:
+                self._refresh_callbacks.append(on_complete)
+            if self._refresh_in_progress:
+                self._refresh_pending = True
+            else:
+                self._refresh_in_progress = True
+                should_start_worker = True
+
+        if not should_start_worker:
+            return
+
+        self._set_refresh_ui_state(True)
+        threading.Thread(target=self._refresh_data_worker, daemon=True).start()
+
+    def _refresh_data_worker(self) -> None:
+        """Load server properties and addon data off the UI thread."""
+        loaded_properties = ServerProperties()
+        loaded_addon_manager = AddonManager()
+        success = True
+
+        try:
+            loaded_properties.load()
+            loaded_addon_manager.refresh()
+        except Exception:
+            success = False
+
+        try:
+            self.after(
+                0,
+                lambda: self._on_refresh_data_complete(
+                    success, loaded_properties, loaded_addon_manager
+                ),
+            )
+        except Exception:
+            pass
+
+    def _on_refresh_data_complete(
+        self,
+        success: bool,
+        loaded_properties: ServerProperties,
+        loaded_addon_manager: AddonManager,
+    ) -> None:
+        """Apply background refresh results and update UI."""
+        with self._refresh_lock:
+            callbacks = self._refresh_callbacks
+            self._refresh_callbacks = []
+
+        if success:
+            self.server_properties = loaded_properties
+            self.addon_manager = loaded_addon_manager
+            self.server_panel.server_properties = self.server_properties
+            self.addon_panel.addon_manager = self.addon_manager
+            self.server_panel.refresh()
+            self.addon_panel.refresh()
+
+            for callback in callbacks:
+                try:
+                    callback()
+                except Exception:
+                    pass
+
+        should_restart = False
+        with self._refresh_lock:
+            if self._refresh_pending:
+                self._refresh_pending = False
+                should_restart = True
+            else:
+                self._refresh_in_progress = False
+
+        if should_restart:
+            threading.Thread(target=self._refresh_data_worker, daemon=True).start()
+        else:
+            self._set_refresh_ui_state(False)
 
     def _show_settings(self) -> None:
         """Show settings dialog."""
-        dialog = SettingsDialog(self)
+        dialog = SettingsDialog(self, self.addon_manager)
         self.wait_window(dialog)
 
         if dialog.changed:
@@ -242,15 +327,17 @@ class MainWindow(ctk.CTk):
 
 
 class ServerPathDialog(ctk.CTkToplevel):
-    """Dialog for selecting server path."""
+    """Dialog for configuring local or SFTP server connection."""
 
     def __init__(self, parent):
         super().__init__(parent)
 
-        self.result: Optional[str] = None
+        self.result: Optional[bool] = None
+        self._dialog_width = 680
+        self._dialog_height = 620
 
-        self.title("Configure Server Path")
-        self.geometry("500x200")
+        self.title("Configure Server Connection")
+        self.geometry(f"{self._dialog_width}x{self._dialog_height}")
         self.resizable(False, False)
 
         # Set window icon
@@ -260,53 +347,149 @@ class ServerPathDialog(ctk.CTkToplevel):
         self.transient(parent)
         self.grab_set()
 
-        # Center on parent
+        # Center on screen (parent geometry may not be finalized on first launch)
         self.update_idletasks()
-        x = parent.winfo_x() + (parent.winfo_width() - 500) // 2
-        y = parent.winfo_y() + (parent.winfo_height() - 200) // 2
+        x = (self.winfo_screenwidth() - self._dialog_width) // 2
+        y = (self.winfo_screenheight() - self._dialog_height) // 2
         self.geometry(f"+{x}+{y}")
 
         self._create_widgets()
 
     def _create_widgets(self) -> None:
         """Create dialog widgets."""
-        # Instructions
         label = ctk.CTkLabel(
             self,
-            text="Select your Minecraft Bedrock Dedicated Server folder:",
+            text="Choose how to connect to your Bedrock server files:",
             font=ctk.CTkFont(size=14),
         )
-        label.pack(pady=(20, 10))
+        label.pack(pady=(20, 12))
 
-        # Path entry frame
-        path_frame = ctk.CTkFrame(self)
-        path_frame.pack(fill="x", padx=20, pady=10)
-
-        self.path_entry = ctk.CTkEntry(path_frame, width=350)
-        self.path_entry.pack(side="left", padx=(10, 5), pady=10)
-
-        if config.server_path:
-            self.path_entry.insert(0, config.server_path)
-
-        browse_btn = ctk.CTkButton(
-            path_frame, text="Browse", width=80, command=self._browse
+        self.connection_mode_var = ctk.StringVar(value=config.connection_type)
+        mode_switch = ctk.CTkSegmentedButton(
+            self,
+            values=["local", "sftp"],
+            variable=self.connection_mode_var,
+            command=self._on_mode_change,
         )
-        browse_btn.pack(side="left", padx=(5, 10), pady=10)
+        mode_switch.pack(padx=20, pady=(0, 12))
 
-        # Buttons
+        content_frame = ctk.CTkScrollableFrame(self)
+        content_frame.pack(fill="both", expand=True, padx=20, pady=5)
+
+        self.local_frame = ctk.CTkFrame(content_frame, fg_color="transparent")
+        self.sftp_frame = ctk.CTkFrame(content_frame, fg_color="transparent")
+
+        self._create_local_widgets()
+        self._create_sftp_widgets()
+        self._on_mode_change(self.connection_mode_var.get())
+
         btn_frame = ctk.CTkFrame(self, fg_color="transparent")
-        btn_frame.pack(fill="x", padx=20, pady=20)
+        btn_frame.pack(fill="x", padx=20, pady=16)
 
         cancel_btn = ctk.CTkButton(
             btn_frame, text="Cancel", width=100, fg_color="gray", command=self.destroy
         )
         cancel_btn.pack(side="right", padx=5)
 
-        save_btn = ctk.CTkButton(btn_frame, text="Save", width=100, command=self._save)
+        save_btn = ctk.CTkButton(
+            btn_frame, text="Confirm", width=100, command=self._save
+        )
         save_btn.pack(side="right", padx=5)
 
-    def _browse(self) -> None:
-        """Open folder browser."""
+    def _create_local_widgets(self) -> None:
+        """Create local filesystem connection fields."""
+        description = ctk.CTkLabel(
+            self.local_frame,
+            text="Local Folder Path",
+            font=ctk.CTkFont(weight="bold"),
+        )
+        description.pack(anchor="w", pady=(6, 4))
+
+        path_frame = ctk.CTkFrame(self.local_frame, fg_color="transparent")
+        path_frame.pack(fill="x", pady=(0, 10))
+
+        self.path_entry = ctk.CTkEntry(path_frame, width=420)
+        self.path_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        self.path_entry.insert(0, config.server_path)
+
+        browse_btn = ctk.CTkButton(
+            path_frame, text="Browse", width=90, command=self._browse_local
+        )
+        browse_btn.pack(side="left")
+
+        note = ctk.CTkLabel(
+            self.local_frame,
+            text="Select the root folder that contains server.properties / behavior_packs / resource_packs.",
+            text_color="gray",
+            font=ctk.CTkFont(size=11),
+            wraplength=620,
+            justify="left",
+        )
+        note.pack(anchor="w")
+
+    def _create_sftp_widgets(self) -> None:
+        """Create SFTP connection fields."""
+        desc = ctk.CTkLabel(
+            self.sftp_frame,
+            text="SFTP Connection",
+            font=ctk.CTkFont(weight="bold"),
+        )
+        desc.grid(row=0, column=0, columnspan=3, sticky="w", pady=(6, 8))
+
+        self.sftp_frame.grid_columnconfigure(1, weight=1)
+
+        def add_row(row: int, label_text: str, entry_attr: str, default: str = "", show: str = None):
+            label = ctk.CTkLabel(self.sftp_frame, text=label_text, anchor="w")
+            label.grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
+            entry = ctk.CTkEntry(self.sftp_frame, show=show) if show else ctk.CTkEntry(self.sftp_frame)
+            entry.grid(row=row, column=1, sticky="ew", pady=4)
+            if default:
+                entry.insert(0, default)
+            setattr(self, entry_attr, entry)
+
+        add_row(1, "Host:", "sftp_host_entry", config.sftp_host)
+        add_row(2, "Port:", "sftp_port_entry", str(config.sftp_port or 22))
+        add_row(3, "Username:", "sftp_username_entry", config.sftp_username)
+        add_row(4, "Password:", "sftp_password_entry", config.sftp_password, show="*")
+        add_row(5, "Private Key (optional):", "sftp_key_file_entry", config.sftp_key_file)
+        add_row(6, "Remote Server Path:", "sftp_remote_path_entry", config.sftp_remote_path or "/")
+        add_row(
+            7,
+            "Status Host (optional):",
+            "sftp_status_host_entry",
+            config.sftp_status_host,
+        )
+
+        key_browse_btn = ctk.CTkButton(
+            self.sftp_frame,
+            text="Browse Key",
+            width=90,
+            command=self._browse_key_file,
+        )
+        key_browse_btn.grid(row=5, column=2, padx=(8, 0), pady=4)
+
+        note = ctk.CTkLabel(
+            self.sftp_frame,
+            text="Status Host is used for Bedrock ping/version checks when it differs from the SFTP host.",
+            text_color="gray",
+            font=ctk.CTkFont(size=11),
+            wraplength=620,
+            justify="left",
+        )
+        note.grid(row=8, column=0, columnspan=3, sticky="w", pady=(8, 0))
+
+    def _on_mode_change(self, mode: str) -> None:
+        """Show the matching connection form for the selected mode."""
+        self.local_frame.pack_forget()
+        self.sftp_frame.pack_forget()
+
+        if mode == "sftp":
+            self.sftp_frame.pack(fill="both", expand=True)
+        else:
+            self.local_frame.pack(fill="both", expand=True)
+
+    def _browse_local(self) -> None:
+        """Open folder browser for local server path."""
         folder = filedialog.askdirectory(
             title="Select Bedrock Server Folder",
             initialdir=self.path_entry.get() or Path.home(),
@@ -315,10 +498,61 @@ class ServerPathDialog(ctk.CTkToplevel):
             self.path_entry.delete(0, "end")
             self.path_entry.insert(0, folder)
 
-    def _save(self) -> None:
-        """Save the selected path."""
-        path = self.path_entry.get().strip()
+    def _browse_key_file(self) -> None:
+        """Open file browser for an SSH private key file."""
+        key_file = filedialog.askopenfilename(
+            title="Select SSH Private Key",
+            initialdir=Path.home(),
+        )
+        if key_file:
+            self.sftp_key_file_entry.delete(0, "end")
+            self.sftp_key_file_entry.insert(0, key_file)
 
+    def _save(self) -> None:
+        """Validate and persist the selected connection settings."""
+        mode = self.connection_mode_var.get().strip().lower()
+
+        if mode == "sftp":
+            host = self.sftp_host_entry.get().strip()
+            port_text = self.sftp_port_entry.get().strip() or "22"
+            username = self.sftp_username_entry.get().strip()
+            password = self.sftp_password_entry.get()
+            key_file = self.sftp_key_file_entry.get().strip()
+            remote_path = self.sftp_remote_path_entry.get().strip()
+            status_host = self.sftp_status_host_entry.get().strip()
+
+            try:
+                port = int(port_text)
+            except ValueError:
+                messagebox.showerror("Error", "SFTP port must be a number.")
+                return
+
+            is_valid, message = server_fs.validate_sftp_connection(
+                host=host,
+                port=port,
+                username=username,
+                password=password,
+                key_file=key_file,
+                remote_path=remote_path,
+                timeout=config.sftp_timeout,
+            )
+            if not is_valid:
+                messagebox.showerror("SFTP Connection Failed", message)
+                return
+
+            config.connection_type = "sftp"
+            config.sftp_host = host
+            config.sftp_port = port
+            config.sftp_username = username
+            config.sftp_password = password
+            config.sftp_key_file = key_file
+            config.sftp_remote_path = remote_path
+            config.sftp_status_host = status_host
+            self.result = True
+            self.destroy()
+            return
+
+        path = self.path_entry.get().strip()
         if not path:
             messagebox.showerror("Error", "Please select a server folder.")
             return
@@ -327,16 +561,13 @@ class ServerPathDialog(ctk.CTkToplevel):
         if not server_path.exists():
             messagebox.showerror("Error", "The selected folder does not exist.")
             return
-
         if not server_path.is_dir():
             messagebox.showerror("Error", "Please select a folder, not a file.")
             return
 
-        # Check for expected server files
         has_properties = (server_path / "server.properties").exists()
         has_behavior = (server_path / "behavior_packs").exists()
         has_resource = (server_path / "resource_packs").exists()
-
         if not (has_properties or has_behavior or has_resource):
             result = messagebox.askyesno(
                 "Warning",
@@ -346,20 +577,24 @@ class ServerPathDialog(ctk.CTkToplevel):
             if not result:
                 return
 
-        self.result = path
+        config.connection_type = "local"
+        config.server_path = path
+        self.result = True
         self.destroy()
 
 
 class SettingsDialog(ctk.CTkToplevel):
     """Settings dialog."""
 
-    def __init__(self, parent):
+    def __init__(self, parent, addon_manager: AddonManager):
         super().__init__(parent)
 
+        self.addon_manager = addon_manager
         self.changed = False
+        self._connection_changed = False
 
         self.title("Settings")
-        self.geometry("450x520")
+        self.geometry("450x580")
         self.resizable(False, False)
 
         # Set window icon
@@ -372,30 +607,41 @@ class SettingsDialog(ctk.CTkToplevel):
         # Center on parent
         self.update_idletasks()
         x = parent.winfo_x() + (parent.winfo_width() - 450) // 2
-        y = parent.winfo_y() + (parent.winfo_height() - 520) // 2
+        y = parent.winfo_y() + (parent.winfo_height() - 580) // 2
         self.geometry(f"+{x}+{y}")
 
         self._create_widgets()
 
     def _create_widgets(self) -> None:
         """Create settings widgets."""
-        # Server path
-        path_label = ctk.CTkLabel(
-            self, text="Server Path:", font=ctk.CTkFont(weight="bold")
+        # Server connection
+        connection_label = ctk.CTkLabel(
+            self, text="Server Connection:", font=ctk.CTkFont(weight="bold")
         )
-        path_label.pack(anchor="w", padx=20, pady=(20, 5))
+        connection_label.pack(anchor="w", padx=20, pady=(20, 5))
 
-        path_frame = ctk.CTkFrame(self, fg_color="transparent")
-        path_frame.pack(fill="x", padx=20)
+        connection_frame = ctk.CTkFrame(self, fg_color="transparent")
+        connection_frame.pack(fill="x", padx=20)
+        connection_frame.grid_columnconfigure(0, weight=1)
 
-        self.path_entry = ctk.CTkEntry(path_frame, width=300)
-        self.path_entry.pack(side="left", padx=(0, 5))
-        self.path_entry.insert(0, config.server_path)
-
-        browse_btn = ctk.CTkButton(
-            path_frame, text="Browse", width=80, command=self._browse
+        self.connection_summary = ctk.CTkLabel(
+            connection_frame,
+            text="",
+            text_color="gray",
+            anchor="w",
+            justify="left",
+            wraplength=280,
         )
-        browse_btn.pack(side="left")
+        self.connection_summary.grid(row=0, column=0, sticky="w")
+
+        configure_btn = ctk.CTkButton(
+            connection_frame,
+            text="Configure...",
+            width=110,
+            command=self._configure_connection,
+        )
+        configure_btn.grid(row=0, column=1, padx=(10, 0), sticky="e")
+        self._refresh_connection_summary()
 
         # Theme
         theme_label = ctk.CTkLabel(self, text="Theme:", font=ctk.CTkFont(weight="bold"))
@@ -457,13 +703,21 @@ class SettingsDialog(ctk.CTkToplevel):
         )
         default_label.pack(anchor="w", padx=20, pady=(20, 5))
 
-        default_info = ctk.CTkLabel(
+        self.default_info_label = ctk.CTkLabel(
             self,
             text=f"{len(config.default_pack_uuids)} packs marked as default",
             font=ctk.CTkFont(size=11),
             text_color="gray",
         )
-        default_info.pack(anchor="w", padx=20)
+        self.default_info_label.pack(anchor="w", padx=20)
+
+        manage_btn = ctk.CTkButton(
+            self,
+            text="Manage Default Addons",
+            width=200,
+            command=self._manage_default_addons,
+        )
+        manage_btn.pack(anchor="w", padx=20, pady=(5, 0))
 
         reset_btn = ctk.CTkButton(
             self,
@@ -486,30 +740,47 @@ class SettingsDialog(ctk.CTkToplevel):
         save_btn = ctk.CTkButton(btn_frame, text="Save", width=100, command=self._save)
         save_btn.pack(side="right", padx=5)
 
-    def _browse(self) -> None:
-        """Open folder browser."""
-        folder = filedialog.askdirectory(
-            title="Select Bedrock Server Folder",
-            initialdir=self.path_entry.get() or Path.home(),
+    def _refresh_connection_summary(self) -> None:
+        """Update the server connection summary text."""
+        mode_text = "SFTP" if config.connection_type == "sftp" else "Local"
+        location = config.get_server_display_path() or "Not configured"
+        self.connection_summary.configure(text=f"Mode: {mode_text}\n{location}")
+
+    def _configure_connection(self) -> None:
+        """Open the server connection configuration dialog."""
+        before = (
+            config.connection_type,
+            config.server_path,
+            config.sftp_host,
+            config.sftp_port,
+            config.sftp_username,
+            config.sftp_remote_path,
+            config.sftp_status_host,
         )
-        if folder:
-            self.path_entry.delete(0, "end")
-            self.path_entry.insert(0, folder)
+        dialog = ServerPathDialog(self)
+        self.wait_window(dialog)
+        if dialog.result:
+            after = (
+                config.connection_type,
+                config.server_path,
+                config.sftp_host,
+                config.sftp_port,
+                config.sftp_username,
+                config.sftp_remote_path,
+                config.sftp_status_host,
+            )
+            if after != before:
+                self._connection_changed = True
+                server_fs.close()
+                self._refresh_connection_summary()
 
     def _save(self) -> None:
         """Save settings."""
-        new_path = self.path_entry.get().strip()
         new_theme = self.theme_var.get()
         new_auto_enable = self.auto_enable_var.get()
         new_check_updates = self.check_updates_var.get()
 
-        if new_path != config.server_path:
-            if new_path:
-                path = Path(new_path)
-                if not path.exists() or not path.is_dir():
-                    messagebox.showerror("Error", "Invalid server path.")
-                    return
-            config.server_path = new_path
+        if self._connection_changed:
             self.changed = True
 
         if new_theme != config.theme:
@@ -524,6 +795,24 @@ class SettingsDialog(ctk.CTkToplevel):
 
         self.destroy()
 
+    def _refresh_default_info(self) -> None:
+        """Refresh default-addon count text."""
+        self.default_info_label.configure(
+            text=f"{len(config.default_pack_uuids)} packs marked as default"
+        )
+
+    def _manage_default_addons(self) -> None:
+        """Open dialog to unmark currently default addons."""
+        dialog = ManageDefaultAddonsDialog(self, self.addon_manager)
+        self.wait_window(dialog)
+
+        if not dialog.changed:
+            return
+
+        Addon.set_default_pack_uuids(set(config.default_pack_uuids))
+        self._refresh_default_info()
+        self.changed = True
+
     def _reset_default_packs(self) -> None:
         """Reset the default packs detection."""
         result = messagebox.askyesno(
@@ -534,6 +823,9 @@ class SettingsDialog(ctk.CTkToplevel):
         )
         if result:
             config.clear_default_pack_uuids()
+            Addon.set_default_pack_uuids(set(config.default_pack_uuids))
+            self._refresh_default_info()
+            self.changed = True
             messagebox.showinfo(
                 "Reset Complete",
                 "Default packs detection has been reset.\n"
@@ -570,6 +862,128 @@ class SettingsDialog(ctk.CTkToplevel):
                 "Up to Date",
                 f"You are running the latest version ({update_info.current_version}).",
             )
+
+
+class ManageDefaultAddonsDialog(ctk.CTkToplevel):
+    """Dialog for managing currently marked default addons."""
+
+    def __init__(self, parent, addon_manager: AddonManager):
+        super().__init__(parent)
+
+        self.addon_manager = addon_manager
+        self.changed = False
+        self._default_vars: List[tuple] = []
+        self._installed_by_uuid: Dict[str, Addon] = {}
+        self._build_installed_lookup()
+
+        self.title("Manage Default Addons")
+        self.geometry("620x460")
+        self.resizable(False, False)
+
+        set_dialog_icon(self)
+        self.transient(parent)
+        self.grab_set()
+
+        self.update_idletasks()
+        x = parent.winfo_x() + (parent.winfo_width() - 620) // 2
+        y = parent.winfo_y() + (parent.winfo_height() - 460) // 2
+        self.geometry(f"+{x}+{y}")
+
+        self._create_widgets()
+
+    def _build_installed_lookup(self) -> None:
+        """Build installed addon lookup by UUID."""
+        all_addons = (
+            self.addon_manager.get_behavior_packs()
+            + self.addon_manager.get_resource_packs()
+        )
+        for addon in all_addons:
+            self._installed_by_uuid[addon.uuid] = addon
+
+    def _create_widgets(self) -> None:
+        """Create dialog widgets."""
+        title = ctk.CTkLabel(
+            self,
+            text="Default Addons",
+            font=ctk.CTkFont(size=18, weight="bold"),
+        )
+        title.pack(pady=(14, 6))
+
+        help_text = ctk.CTkLabel(
+            self,
+            text="Uncheck any addon you no longer want marked as default.",
+            font=ctk.CTkFont(size=11),
+            text_color="gray",
+        )
+        help_text.pack(pady=(0, 10))
+
+        scroll = ctk.CTkScrollableFrame(self)
+        scroll.pack(fill="both", expand=True, padx=14, pady=(0, 10))
+
+        default_uuids = list(config.default_pack_uuids)
+        if not default_uuids:
+            empty = ctk.CTkLabel(
+                scroll,
+                text="No addons are currently marked as default.",
+                text_color="gray",
+            )
+            empty.pack(pady=20)
+        else:
+            for addon_uuid in default_uuids:
+                addon = self._installed_by_uuid.get(addon_uuid)
+                if addon:
+                    pack_kind = (
+                        "Behavior" if addon.pack_type == PackType.BEHAVIOR else "Resource"
+                    )
+                    title_text = f"{addon.name} ({pack_kind})"
+                else:
+                    title_text = "Unknown Addon"
+
+                row = ctk.CTkFrame(scroll)
+                row.pack(fill="x", padx=4, pady=4)
+
+                keep_var = ctk.BooleanVar(value=True)
+                self._default_vars.append((addon_uuid, keep_var))
+
+                check = ctk.CTkCheckBox(
+                    row,
+                    text=title_text,
+                    variable=keep_var,
+                )
+                check.pack(anchor="w", padx=10, pady=(8, 2))
+
+                uuid_label = ctk.CTkLabel(
+                    row,
+                    text=addon_uuid,
+                    font=ctk.CTkFont(size=10),
+                    text_color="gray",
+                )
+                uuid_label.pack(anchor="w", padx=32, pady=(0, 8))
+
+        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
+        btn_frame.pack(fill="x", padx=14, pady=(0, 14))
+
+        cancel_btn = ctk.CTkButton(
+            btn_frame, text="Cancel", width=100, fg_color="gray", command=self.destroy
+        )
+        cancel_btn.pack(side="right", padx=5)
+
+        save_btn = ctk.CTkButton(
+            btn_frame, text="Save", width=100, command=self._save_changes
+        )
+        save_btn.pack(side="right", padx=5)
+
+    def _save_changes(self) -> None:
+        """Persist selected default-addon entries."""
+        original = list(config.default_pack_uuids)
+        updated = [uuid for uuid, keep_var in self._default_vars if keep_var.get()]
+
+        if updated != original:
+            config.default_pack_uuids = updated
+            config.default_packs_detected = True
+            self.changed = True
+
+        self.destroy()
 
 
 class DefaultPacksDialog(ctk.CTkToplevel):

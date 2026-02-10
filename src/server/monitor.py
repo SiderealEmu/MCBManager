@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Optional
 
 from ..config import config
+from .filesystem import server_fs
+from .status import ServerStatusQuery
 
 
 def _get_subprocess_startupinfo():
@@ -32,6 +34,15 @@ class ServerMonitor:
         """Check if the Bedrock server is running."""
         self._is_running = False
         self._process_name = None
+
+        # In SFTP mode, infer running status from Bedrock status query.
+        if config.connection_type == "sftp":
+            try:
+                status = ServerStatusQuery().query()
+                self._is_running = status.online
+            except Exception:
+                self._is_running = False
+            return self._is_running
 
         system = platform.system()
 
@@ -106,6 +117,9 @@ class ServerMonitor:
 
     def get_server_executable(self) -> Optional[Path]:
         """Get the path to the server executable."""
+        if config.connection_type == "sftp":
+            return None
+
         if not config.is_server_configured():
             return None
 
@@ -121,6 +135,14 @@ class ServerMonitor:
 
     def server_exists(self) -> bool:
         """Check if the server executable exists."""
+        if config.connection_type == "sftp":
+            # SFTP servers may not expose or run the executable from the same host.
+            return (
+                server_fs.exists("server.properties")
+                or server_fs.exists("behavior_packs")
+                or server_fs.exists("resource_packs")
+            )
+
         return self.get_server_executable() is not None
 
     def get_status_text(self) -> str:

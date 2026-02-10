@@ -1,14 +1,16 @@
 """Addon panel UI component."""
 
+import threading
+from collections import deque
 from pathlib import Path
 from tkinter import messagebox
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 import customtkinter as ctk
 from PIL import Image
 
 from ..addon import Addon, AddonManager, PackType
-from ..server import ServerMonitor
+from ..server import ServerMonitor, server_fs
 from .import_dialog import ImportDialog
 
 # Global image cache to avoid reloading/resizing images
@@ -51,17 +53,135 @@ class AddonPanel(ctk.CTkFrame):
         self._search_debounce_id: Optional[str] = None
 
         # Collapse state for sections (per tab)
+        self._behavior_beta_api_collapsed: bool = False
         self._behavior_missing_deps_collapsed: bool = False
         self._behavior_enabled_collapsed: bool = False
         self._behavior_disabled_collapsed: bool = False
+        self._resource_beta_api_collapsed: bool = False
         self._resource_missing_deps_collapsed: bool = False
         self._resource_enabled_collapsed: bool = False
         self._resource_disabled_collapsed: bool = False
 
         # Cache for installed UUIDs (refreshed when pack lists change)
         self._installed_uuids: set = set()
+        self._addon_cards_by_uuid: Dict[str, List["AddonCard"]] = {}
+        self._delete_queue = deque()
+        self._delete_state_by_uuid: Dict[str, str] = {}
+        self._delete_queue_lock = threading.Lock()
+        self._delete_worker_thread: Optional[threading.Thread] = None
 
         self._create_widgets()
+
+    def _get_delete_state(self, addon_uuid: str) -> Optional[str]:
+        """Get queue/deletion state for an addon UUID."""
+        with self._delete_queue_lock:
+            return self._delete_state_by_uuid.get(addon_uuid)
+
+    def _set_delete_state(self, addon_uuid: str, state: Optional[str]) -> None:
+        """Set or clear queue/deletion state for an addon UUID."""
+        with self._delete_queue_lock:
+            if state is None:
+                self._delete_state_by_uuid.pop(addon_uuid, None)
+            else:
+                self._delete_state_by_uuid[addon_uuid] = state
+
+    def _run_on_ui_thread(self, callback: Callable) -> None:
+        """Schedule a callback on the Tk main thread."""
+        try:
+            self.after(0, callback)
+        except Exception:
+            pass
+
+    def _queue_addon_deletion(
+        self, addon: Addon, show_already_queued_warning: bool = True
+    ) -> bool:
+        """Queue an addon for background deletion."""
+        existing_state = self._get_delete_state(addon.uuid)
+        if existing_state:
+            if show_already_queued_warning:
+                messagebox.showinfo(
+                    "Already Queued",
+                    f"'{addon.name}' is already {existing_state}.",
+                )
+            return False
+
+        should_start_worker = False
+        with self._delete_queue_lock:
+            self._delete_state_by_uuid[addon.uuid] = "queued"
+            self._delete_queue.append(addon)
+            should_start_worker = (
+                self._delete_worker_thread is None
+                or not self._delete_worker_thread.is_alive()
+            )
+            if should_start_worker:
+                self._delete_worker_thread = threading.Thread(
+                    target=self._process_delete_queue_worker, daemon=True
+                )
+
+        self._update_filtered_lists()
+        if should_start_worker and self._delete_worker_thread is not None:
+            self._delete_worker_thread.start()
+        return True
+
+    def _process_delete_queue_worker(self) -> None:
+        """Process queued addon deletions in background."""
+        while True:
+            with self._delete_queue_lock:
+                if not self._delete_queue:
+                    return
+                addon = self._delete_queue.popleft()
+                self._delete_state_by_uuid[addon.uuid] = "deleting"
+            self._run_on_ui_thread(
+                lambda addon_uuid=addon.uuid: self._set_delete_state_visual(
+                    addon_uuid, "deleting"
+                )
+            )
+
+            success = False
+            error_message = "Failed to delete addon."
+            try:
+                # Disable from all worlds first
+                for world in self.addon_manager.get_worlds():
+                    self.addon_manager.disable_addon(addon, world)
+
+                success = self.addon_manager.delete_addon(addon)
+            except Exception as exc:
+                success = False
+                error_message = str(exc) or error_message
+
+            self._run_on_ui_thread(
+                lambda a=addon, ok=success, err=error_message: self._on_delete_complete(
+                    a, ok, err
+                )
+            )
+
+    def _on_delete_complete(
+        self, addon: Addon, success: bool, error_message: str
+    ) -> None:
+        """Handle completion of a background addon delete operation."""
+        self._set_delete_state(addon.uuid, None)
+
+        if success:
+            # Avoid a full app-level refresh here to keep deletion completion responsive.
+            self.refresh()
+        else:
+            self._update_filtered_lists()
+            messagebox.showerror(
+                "Delete Failed", f"Failed to delete '{addon.name}'.\n\n{error_message}"
+            )
+
+    def _register_addon_card(self, card: "AddonCard") -> None:
+        """Register a rendered addon card for targeted status updates."""
+        addon_uuid = card.addon.uuid
+        if addon_uuid not in self._addon_cards_by_uuid:
+            self._addon_cards_by_uuid[addon_uuid] = [card]
+        else:
+            self._addon_cards_by_uuid[addon_uuid].append(card)
+
+    def _set_delete_state_visual(self, addon_uuid: str, state: Optional[str]) -> None:
+        """Update deletion state on visible cards without rebuilding the full list."""
+        for card in self._addon_cards_by_uuid.get(addon_uuid, []):
+            card.set_deletion_state(state)
 
     def _is_server_running(self) -> bool:
         """Check if the server is currently running."""
@@ -284,6 +404,10 @@ class AddonPanel(ctk.CTkFrame):
         # Update installed UUIDs cache
         all_addons = self._behavior_packs + self._resource_packs
         self._installed_uuids = {addon.uuid for addon in all_addons}
+        self._addon_cards_by_uuid = {}
+        behavior_positions, resource_positions = (
+            self._get_selected_world_pack_positions()
+        )
 
         filtered_behavior = self._filter_packs(self._behavior_packs)
         filtered_resource = self._filter_packs(self._resource_packs)
@@ -293,13 +417,55 @@ class AddonPanel(ctk.CTkFrame):
             self.behavior_empty_msg,
             filtered_behavior,
             PackType.BEHAVIOR,
+            world_pack_positions=behavior_positions,
         )
         self._update_pack_list(
             self.resource_scroll,
             self.resource_empty_msg,
             filtered_resource,
             PackType.RESOURCE,
+            world_pack_positions=resource_positions,
         )
+
+    def _get_selected_world_pack_positions(
+        self,
+    ) -> Tuple[Dict[str, int], Dict[str, int]]:
+        """Get enabled pack position maps for the selected world."""
+        if not self.selected_world:
+            return {}, {}
+
+        behavior_positions = self._read_world_pack_positions(
+            self.selected_world, "world_behavior_packs.json"
+        )
+        resource_positions = self._read_world_pack_positions(
+            self.selected_world, "world_resource_packs.json"
+        )
+        return behavior_positions, resource_positions
+
+    def _read_world_pack_positions(
+        self, world_name: str, filename: str
+    ) -> Dict[str, int]:
+        """Read a world's pack file once and return pack_id -> load-order index."""
+        pack_file = server_fs.join("worlds", world_name, filename)
+        if not server_fs.exists(pack_file):
+            return {}
+
+        try:
+            packs = server_fs.read_json(pack_file)
+        except Exception:
+            return {}
+
+        positions: Dict[str, int] = {}
+        if not isinstance(packs, list):
+            return positions
+
+        for idx, pack in enumerate(packs):
+            if not isinstance(pack, dict):
+                continue
+            pack_id = pack.get("pack_id")
+            if pack_id:
+                positions[pack_id] = idx
+        return positions
 
     def _on_search_change(self, event=None) -> None:
         """Handle search entry change with debouncing."""
@@ -333,6 +499,7 @@ class AddonPanel(ctk.CTkFrame):
         empty_message: str,
         packs: List[Addon],
         pack_type: PackType,
+        world_pack_positions: Optional[Dict[str, int]] = None,
     ) -> None:
         """Update a pack list frame."""
         # Temporarily disable scrolling updates for smoother rebuilding
@@ -357,37 +524,43 @@ class AddonPanel(ctk.CTkFrame):
             empty_label.pack(pady=50)
             return
 
-        # Separate packs into categories: missing deps, enabled, disabled
+        # Separate packs into categories: beta API deps, missing deps, enabled, disabled
+        world_pack_positions = world_pack_positions or {}
+
+        beta_api_packs = []
         missing_deps_packs = []
         enabled_packs = []
         disabled_packs = []
 
         for pack in packs:
-            # Check if pack has missing dependencies
+            position = world_pack_positions.get(pack.uuid)
+            is_enabled = position is not None
+
+            has_beta_api_deps = pack.has_minecraft_beta_dependencies()
             if pack.has_missing_dependencies(self._installed_uuids):
-                missing_deps_packs.append(pack)
-            elif self.selected_world and self.addon_manager.is_addon_enabled_in_world(
-                pack, self.selected_world
-            ):
-                position = self.addon_manager.get_addon_position(
-                    pack, self.selected_world
-                )
-                enabled_packs.append((pack, position if position is not None else 999))
+                missing_deps_packs.append((pack, is_enabled))
+            elif has_beta_api_deps:
+                beta_api_packs.append((pack, is_enabled))
+            elif is_enabled:
+                enabled_packs.append((pack, position))
             else:
                 disabled_packs.append(pack)
 
         # Sort enabled packs by position (load order)
         enabled_packs.sort(key=lambda x: x[1])
+        total_beta_api = len(beta_api_packs)
         total_missing_deps = len(missing_deps_packs)
         total_enabled = len(enabled_packs)
         total_disabled = len(disabled_packs)
 
         # Get collapse states for this pack type
         if pack_type == PackType.BEHAVIOR:
+            beta_api_collapsed = self._behavior_beta_api_collapsed
             missing_deps_collapsed = self._behavior_missing_deps_collapsed
             enabled_collapsed = self._behavior_enabled_collapsed
             disabled_collapsed = self._behavior_disabled_collapsed
         else:
+            beta_api_collapsed = self._resource_beta_api_collapsed
             missing_deps_collapsed = self._resource_missing_deps_collapsed
             enabled_collapsed = self._resource_enabled_collapsed
             disabled_collapsed = self._resource_disabled_collapsed
@@ -398,7 +571,13 @@ class AddonPanel(ctk.CTkFrame):
         summary_frame = ctk.CTkFrame(scroll_frame, fg_color="transparent")
         summary_frame.grid(row=row, column=0, sticky="ew", pady=(5, 10), padx=5)
 
-        summary_parts = [f"Total: {len(packs)}", f"Enabled: {total_enabled}", f"Disabled: {total_disabled}"]
+        summary_parts = [
+            f"Total: {len(packs)}",
+            f"Enabled: {total_enabled}",
+            f"Disabled: {total_disabled}",
+        ]
+        if total_beta_api > 0:
+            summary_parts.append(f"Minecraft Beta API: {total_beta_api}")
         if total_missing_deps > 0:
             summary_parts.append(f"Missing Deps: {total_missing_deps}")
 
@@ -410,6 +589,35 @@ class AddonPanel(ctk.CTkFrame):
         )
         summary_label.pack(side="left")
         row += 1
+
+        # Section for packs requiring Minecraft Beta API
+        if beta_api_packs:
+            beta_header = self._create_collapsible_header(
+                scroll_frame,
+                f"Minecraft Beta API ({total_beta_api})",
+                beta_api_collapsed,
+                lambda: self._toggle_section(pack_type, "beta_api"),
+                header_color="#FF9800",
+            )
+            beta_header.grid(row=row, column=0, sticky="ew", pady=(5, 5), padx=5)
+            row += 1
+
+            if not beta_api_collapsed:
+                for pack, is_enabled in sorted(beta_api_packs, key=lambda x: x[0].name.lower()):
+                    card = AddonCard(
+                        scroll_frame,
+                        pack,
+                        self.selected_world,
+                        self.addon_manager,
+                        on_toggle=self._on_addon_toggle,
+                        on_delete=self._on_addon_delete,
+                        installed_uuids=self._installed_uuids,
+                        deletion_state=self._get_delete_state(pack.uuid),
+                        is_enabled=is_enabled,
+                    )
+                    self._register_addon_card(card)
+                    card.grid(row=row, column=0, sticky="ew", pady=5, padx=5)
+                    row += 1
 
         # Section for packs with missing dependencies (at top, highlighted)
         if missing_deps_packs:
@@ -424,7 +632,9 @@ class AddonPanel(ctk.CTkFrame):
             row += 1
 
             if not missing_deps_collapsed:
-                for pack in sorted(missing_deps_packs, key=lambda x: x.name.lower()):
+                for pack, is_enabled in sorted(
+                    missing_deps_packs, key=lambda x: x[0].name.lower()
+                ):
                     card = AddonCard(
                         scroll_frame,
                         pack,
@@ -433,7 +643,10 @@ class AddonPanel(ctk.CTkFrame):
                         on_toggle=self._on_addon_toggle,
                         on_delete=self._on_addon_delete,
                         installed_uuids=self._installed_uuids,
+                        deletion_state=self._get_delete_state(pack.uuid),
+                        is_enabled=is_enabled,
                     )
+                    self._register_addon_card(card)
                     card.grid(row=row, column=0, sticky="ew", pady=5, padx=5)
                     row += 1
 
@@ -445,7 +658,13 @@ class AddonPanel(ctk.CTkFrame):
                 enabled_collapsed,
                 lambda: self._toggle_section(pack_type, "enabled"),
             )
-            enabled_header.grid(row=row, column=0, sticky="ew", pady=(15 if missing_deps_packs else 5, 5), padx=5)
+            enabled_header.grid(
+                row=row,
+                column=0,
+                sticky="ew",
+                pady=(15 if (missing_deps_packs or beta_api_packs) else 5, 5),
+                padx=5,
+            )
             row += 1
 
             if not enabled_collapsed:
@@ -462,7 +681,10 @@ class AddonPanel(ctk.CTkFrame):
                         position=position,
                         total_enabled=total_enabled,
                         installed_uuids=self._installed_uuids,
+                        deletion_state=self._get_delete_state(pack.uuid),
+                        is_enabled=True,
                     )
+                    self._register_addon_card(card)
                     card.grid(row=row, column=0, sticky="ew", pady=5, padx=5)
                     row += 1
 
@@ -487,7 +709,10 @@ class AddonPanel(ctk.CTkFrame):
                         on_toggle=self._on_addon_toggle,
                         on_delete=self._on_addon_delete,
                         installed_uuids=self._installed_uuids,
+                        deletion_state=self._get_delete_state(pack.uuid),
+                        is_enabled=False,
                     )
+                    self._register_addon_card(card)
                     card.grid(row=row, column=0, sticky="ew", pady=5, padx=5)
                     row += 1
 
@@ -506,7 +731,7 @@ class AddonPanel(ctk.CTkFrame):
         header_frame = ctk.CTkFrame(parent, fg_color="transparent", cursor="hand2")
 
         # Collapse/expand indicator
-        indicator = "\u25B6" if is_collapsed else "\u25BC"  # Right or down triangle
+        indicator = "\u25b6" if is_collapsed else "\u25bc"  # Right or down triangle
         indicator_label = ctk.CTkLabel(
             header_frame,
             text=indicator,
@@ -539,19 +764,31 @@ class AddonPanel(ctk.CTkFrame):
     def _toggle_section(self, pack_type: PackType, section: str) -> None:
         """Toggle the collapsed state of a section."""
         if pack_type == PackType.BEHAVIOR:
-            if section == "missing_deps":
-                self._behavior_missing_deps_collapsed = not self._behavior_missing_deps_collapsed
+            if section == "beta_api":
+                self._behavior_beta_api_collapsed = not self._behavior_beta_api_collapsed
+            elif section == "missing_deps":
+                self._behavior_missing_deps_collapsed = (
+                    not self._behavior_missing_deps_collapsed
+                )
             elif section == "enabled":
                 self._behavior_enabled_collapsed = not self._behavior_enabled_collapsed
             else:
-                self._behavior_disabled_collapsed = not self._behavior_disabled_collapsed
+                self._behavior_disabled_collapsed = (
+                    not self._behavior_disabled_collapsed
+                )
         else:
-            if section == "missing_deps":
-                self._resource_missing_deps_collapsed = not self._resource_missing_deps_collapsed
+            if section == "beta_api":
+                self._resource_beta_api_collapsed = not self._resource_beta_api_collapsed
+            elif section == "missing_deps":
+                self._resource_missing_deps_collapsed = (
+                    not self._resource_missing_deps_collapsed
+                )
             elif section == "enabled":
                 self._resource_enabled_collapsed = not self._resource_enabled_collapsed
             else:
-                self._resource_disabled_collapsed = not self._resource_disabled_collapsed
+                self._resource_disabled_collapsed = (
+                    not self._resource_disabled_collapsed
+                )
 
         # Refresh the lists to apply the change
         self._update_filtered_lists()
@@ -564,6 +801,15 @@ class AddonPanel(ctk.CTkFrame):
 
     def _on_addon_toggle(self, addon: Addon, enabled: bool) -> None:
         """Handle addon enable/disable toggle."""
+        delete_state = self._get_delete_state(addon.uuid)
+        if delete_state:
+            messagebox.showwarning(
+                "Deletion Pending",
+                f"'{addon.name}' is currently {delete_state} and cannot be modified.",
+            )
+            self.refresh()
+            return
+
         if self._is_server_running():
             self._show_server_running_warning()
             self.refresh()  # Reset the toggle switch
@@ -603,31 +849,32 @@ class AddonPanel(ctk.CTkFrame):
             self._show_server_running_warning()
             return
 
+        existing_state = self._get_delete_state(addon.uuid)
+        if existing_state:
+            messagebox.showinfo(
+                "Already Queued",
+                f"'{addon.name}' is already {existing_state}.",
+            )
+            return
+
         result = messagebox.askyesno(
-            "Confirm Delete",
+            "Queue Delete",
             f"Are you sure you want to delete '{addon.name}'?\n\n"
-            "This will remove it from the server and cannot be undone.",
+            "This will queue the deletion in the background.\n"
+            "You can queue other deletions while this runs.\n\n"
+            "IMPORTANT: If an addon has lots of files, deletion can take a while and the "
+            "command issued by MCBManager will most likely timeout.\n"
+            "If your server-management application has a built-in trash function, use that instead.",
         )
 
         if result:
-            # First disable from all worlds
-            for world in self.addon_manager.get_worlds():
-                if addon.pack_type == PackType.BEHAVIOR:
-                    self.addon_manager.disable_addon(addon, world)
-                else:
-                    self.addon_manager.disable_addon(addon, world)
-
-            # Delete the pack
-            success = self.addon_manager.delete_addon(addon)
-
-            if success:
-                self.refresh()
-                messagebox.showinfo("Success", f"'{addon.name}' has been deleted.")
-            else:
-                messagebox.showerror("Error", "Failed to delete addon.")
+            self._queue_addon_deletion(addon)
 
     def _on_move_up(self, addon: Addon) -> None:
         """Handle move up button click (increase priority)."""
+        if self._get_delete_state(addon.uuid):
+            return
+
         if self._is_server_running():
             self._show_server_running_warning()
             return
@@ -635,14 +882,15 @@ class AddonPanel(ctk.CTkFrame):
         if not self.selected_world:
             return
 
-        success = self.addon_manager.move_addon_priority(
-            addon, self.selected_world, -1
-        )
+        success = self.addon_manager.move_addon_priority(addon, self.selected_world, -1)
         if success:
             self.refresh()
 
     def _on_move_down(self, addon: Addon) -> None:
         """Handle move down button click (decrease priority)."""
+        if self._get_delete_state(addon.uuid):
+            return
+
         if self._is_server_running():
             self._show_server_running_warning()
             return
@@ -650,9 +898,7 @@ class AddonPanel(ctk.CTkFrame):
         if not self.selected_world:
             return
 
-        success = self.addon_manager.move_addon_priority(
-            addon, self.selected_world, +1
-        )
+        success = self.addon_manager.move_addon_priority(addon, self.selected_world, +1)
         if success:
             self.refresh()
 
@@ -676,8 +922,15 @@ class AddonPanel(ctk.CTkFrame):
 
     def _auto_enable_imported_packs(self, imported_packs: list) -> None:
         """Automatically enable imported packs in the selected world."""
-        # First refresh to get the newly imported packs
-        self.addon_manager.refresh()
+        # Refresh in background first, then enable imported packs from the updated list.
+        self._request_data_refresh(
+            on_complete=lambda packs=imported_packs: (
+                self._auto_enable_imported_packs_after_refresh(packs)
+            )
+        )
+
+    def _auto_enable_imported_packs_after_refresh(self, imported_packs: list) -> None:
+        """Enable imported packs after a refresh has completed."""
 
         if not imported_packs or not self.selected_world:
             self.refresh()
@@ -694,7 +947,7 @@ class AddonPanel(ctk.CTkFrame):
         for folder_name, pack_type in imported_packs:
             # Find the addon by matching folder name
             for addon in all_packs:
-                if addon.path.name == folder_name and addon.pack_type == pack_type:
+                if addon.folder_name == folder_name and addon.pack_type == pack_type:
                     if not self.addon_manager.is_addon_enabled_in_world(
                         addon, self.selected_world
                     ):
@@ -704,13 +957,33 @@ class AddonPanel(ctk.CTkFrame):
         # Update the UI
         self.refresh()
 
+    def _request_data_refresh(
+        self, on_complete: Optional[Callable[[], None]] = None
+    ) -> None:
+        """Request a data refresh, using parent background refresh when available."""
+        if self.on_refresh:
+            try:
+                self.on_refresh(on_complete=on_complete)
+            except TypeError:
+                self.on_refresh()
+                if on_complete:
+                    try:
+                        on_complete()
+                    except Exception:
+                        pass
+            return
+
+        self.addon_manager.refresh()
+        self.refresh()
+        if on_complete:
+            try:
+                on_complete()
+            except Exception:
+                pass
+
     def _refresh(self) -> None:
         """Refresh data from parent."""
-        if self.on_refresh:
-            self.on_refresh()
-        else:
-            self.addon_manager.refresh()
-            self.refresh()
+        self._request_data_refresh()
 
     def _delete_all_behavior_packs(self) -> None:
         """Delete all custom (non-default) behavior packs."""
@@ -823,39 +1096,29 @@ class AddonPanel(ctk.CTkFrame):
             "Confirm Delete All",
             f"Are you sure you want to delete all {len(custom_packs)} custom {pack_type_name} pack(s)?\n\n"
             "This will remove them from the server and cannot be undone.\n"
-            "Default packs will not be deleted.",
+            "Default packs will not be deleted.\n\n"
+            "IMPORTANT: If addons have lots of files, deletion can take a while and the "
+            "command issued by MCBManager will most likely timeout.\n"
+            "If your server-management application has a built-in trash function, use that instead.",
         )
 
         if not result:
             return
 
-        # Delete each pack
-        deleted_count = 0
-        failed_count = 0
-
+        queued_count = 0
         for pack in custom_packs:
-            # Disable from all worlds first
-            for world in self.addon_manager.get_worlds():
-                self.addon_manager.disable_addon(pack, world)
+            if self._queue_addon_deletion(pack, show_already_queued_warning=False):
+                queued_count += 1
 
-            # Delete the pack
-            if self.addon_manager.delete_addon(pack):
-                deleted_count += 1
-            else:
-                failed_count += 1
-
-        # Refresh and show result
-        self._refresh()
-
-        if failed_count == 0:
+        if queued_count > 0:
             messagebox.showinfo(
-                "Delete Complete",
-                f"Successfully deleted {deleted_count} {pack_type_name} pack(s).",
+                "Delete Queued",
+                f"Queued {queued_count} custom {pack_type_name} pack(s) for background deletion.",
             )
         else:
-            messagebox.showwarning(
-                "Delete Partially Complete",
-                f"Deleted {deleted_count} pack(s), but {failed_count} failed to delete.",
+            messagebox.showinfo(
+                "Nothing Queued",
+                f"No additional {pack_type_name} packs were queued for deletion.",
             )
 
 
@@ -875,6 +1138,8 @@ class AddonCard(ctk.CTkFrame):
         position: Optional[int] = None,
         total_enabled: int = 0,
         installed_uuids: Optional[set] = None,
+        deletion_state: Optional[str] = None,
+        is_enabled: bool = False,
     ):
         super().__init__(parent)
 
@@ -888,6 +1153,11 @@ class AddonCard(ctk.CTkFrame):
         self.position = position
         self.total_enabled = total_enabled
         self.installed_uuids = installed_uuids or self._get_installed_uuids()
+        self.deletion_state = deletion_state
+        self.is_enabled = is_enabled
+        self._has_issues = False
+        self.info_container: Optional[ctk.CTkFrame] = None
+        self.delete_status_label: Optional[ctk.CTkLabel] = None
 
         self._create_widgets()
 
@@ -898,17 +1168,24 @@ class AddonCard(ctk.CTkFrame):
 
         # Check for missing dependencies
         has_missing_deps = self.addon.has_missing_dependencies(self.installed_uuids)
-        missing_deps_count = len(self.addon.get_missing_dependencies(self.installed_uuids))
+        has_beta_api_deps = self.addon.has_minecraft_beta_dependencies()
+        missing_deps_count = len(
+            self.addon.get_missing_dependencies(self.installed_uuids)
+        )
 
         # Determine if addon has issues (incompatible or missing dependencies)
         has_issues = not is_compatible or has_missing_deps
+        self._has_issues = has_issues
+        is_delete_queued = self.deletion_state in {"queued", "deleting"}
 
         # Use pack layout for more stable rendering during scroll
         self.configure(height=70)
         self.pack_propagate(False)
 
         # Set border color for addons with issues
-        if has_issues:
+        if is_delete_queued:
+            self.configure(border_width=2, border_color="#FFA000")
+        elif has_issues:
             self.configure(border_width=2, border_color="#D32F2F")
 
         # Main container using pack for stability
@@ -921,8 +1198,13 @@ class AddonCard(ctk.CTkFrame):
         icon_frame.pack_propagate(False)
 
         # Try to load pack icon from cache
-        if self.addon.icon_path and self.addon.icon_path.exists():
-            photo = get_cached_icon(self.addon.icon_path)
+        icon_file = (
+            server_fs.get_local_file_copy(self.addon.icon_path)
+            if self.addon.icon_path
+            else None
+        )
+        if icon_file:
+            photo = get_cached_icon(icon_file)
             if photo:
                 icon_label = ctk.CTkLabel(icon_frame, image=photo, text="")
                 icon_label.place(relx=0.5, rely=0.5, anchor="center")
@@ -938,6 +1220,7 @@ class AddonCard(ctk.CTkFrame):
         # Info container in the middle (takes remaining space)
         info_container = ctk.CTkFrame(main_container, fg_color="transparent")
         info_container.pack(side="left", fill="both", expand=True, pady=5)
+        self.info_container = info_container
 
         # Pack name with position indicator for enabled packs
         name_text = self.addon.name
@@ -968,6 +1251,8 @@ class AddonCard(ctk.CTkFrame):
             info_text += f" ({missing_deps_count} missing dependency)"
             if missing_deps_count > 1:
                 info_text = info_text.replace("dependency)", "dependencies)")
+        elif has_beta_api_deps:
+            info_text += " (Requires Minecraft Beta API)"
         elif self.addon.description:
             desc = self.addon.description[:50]
             if len(self.addon.description) > 50:
@@ -985,6 +1270,25 @@ class AddonCard(ctk.CTkFrame):
         )
         info_label.pack(anchor="nw", pady=(0, 5))
 
+        if self.deletion_state == "queued":
+            self.delete_status_label = ctk.CTkLabel(
+                info_container,
+                text="Queued for deletion",
+                font=ctk.CTkFont(size=11, weight="bold"),
+                text_color="#FFA000",
+                anchor="w",
+            )
+            self.delete_status_label.pack(anchor="nw", pady=(0, 2))
+        elif self.deletion_state == "deleting":
+            self.delete_status_label = ctk.CTkLabel(
+                info_container,
+                text="Deleting in background...",
+                font=ctk.CTkFont(size=11, weight="bold"),
+                text_color="#FFA000",
+                anchor="w",
+            )
+            self.delete_status_label.pack(anchor="nw", pady=(0, 2))
+
         # Priority controls (only for enabled packs with move callbacks)
         if self.position is not None and (self.on_move_up or self.on_move_down):
             priority_frame = ctk.CTkFrame(controls_frame, fg_color="transparent")
@@ -994,12 +1298,12 @@ class AddonCard(ctk.CTkFrame):
             can_move_up = self.position > 0
             self.up_btn = ctk.CTkButton(
                 priority_frame,
-                text="\u25B2",  # Unicode up triangle
+                text="\u25b2",  # Unicode up triangle
                 width=30,
                 height=24,
                 font=ctk.CTkFont(size=10),
                 command=self._on_move_up_click,
-                state="normal" if can_move_up else "disabled",
+                state="normal" if can_move_up and not is_delete_queued else "disabled",
                 fg_color="#555555" if can_move_up else "#333333",
             )
             self.up_btn.pack(side="left", padx=2)
@@ -1008,30 +1312,33 @@ class AddonCard(ctk.CTkFrame):
             can_move_down = self.position < self.total_enabled - 1
             self.down_btn = ctk.CTkButton(
                 priority_frame,
-                text="\u25BC",  # Unicode down triangle
+                text="\u25bc",  # Unicode down triangle
                 width=30,
                 height=24,
                 font=ctk.CTkFont(size=10),
                 command=self._on_move_down_click,
-                state="normal" if can_move_down else "disabled",
+                state="normal"
+                if can_move_down and not is_delete_queued
+                else "disabled",
                 fg_color="#555555" if can_move_down else "#333333",
             )
             self.down_btn.pack(side="left", padx=2)
 
-        # Enable/Disable switch
-        is_enabled = False
-        if self.world:
-            is_enabled = self.addon_manager.is_addon_enabled_in_world(
-                self.addon, self.world
-            )
-
         # Disable switch for addons with missing dependencies
-        switch_state = "disabled" if has_missing_deps else "normal"
+        switch_state = "disabled" if has_missing_deps or is_delete_queued else "normal"
 
-        self.switch_var = ctk.BooleanVar(value=is_enabled)
+        self.switch_var = ctk.BooleanVar(value=self.is_enabled)
         self.switch = ctk.CTkSwitch(
             controls_frame,
-            text="Enabled" if not has_missing_deps else "Missing Deps",
+            text=(
+                "Deleting..."
+                if self.deletion_state == "deleting"
+                else "Queued"
+                if self.deletion_state == "queued"
+                else "Enabled"
+                if not has_missing_deps
+                else "Missing Deps"
+            ),
             variable=self.switch_var,
             command=self._on_switch_toggle,
             width=40,
@@ -1048,18 +1355,24 @@ class AddonCard(ctk.CTkFrame):
             fg_color="#555555",
             hover_color="#666666",
             command=self._on_info_click,
+            state="disabled" if is_delete_queued else "normal",
         )
         self.info_btn.pack(side="left", padx=(0, 5))
 
         # Delete button
         self.delete_btn = ctk.CTkButton(
             controls_frame,
-            text="Delete",
+            text="Queued"
+            if self.deletion_state == "queued"
+            else "Deleting"
+            if self.deletion_state == "deleting"
+            else "Delete",
             width=60,
             height=28,
             fg_color="#D32F2F",
             hover_color="#B71C1C",
             command=self._on_delete_click,
+            state="disabled" if is_delete_queued else "normal",
         )
         self.delete_btn.pack(side="left")
 
@@ -1110,3 +1423,64 @@ class AddonCard(ctk.CTkFrame):
             self.winfo_toplevel(), self.addon, self.addon_manager
         )
         self.winfo_toplevel().wait_window(dialog)
+
+    def set_deletion_state(self, state: Optional[str]) -> None:
+        """Update deletion state visuals without rebuilding all addon cards."""
+        self.deletion_state = state
+        is_delete_queued = state in {"queued", "deleting"}
+
+        if is_delete_queued:
+            self.configure(border_width=2, border_color="#FFA000")
+        elif self._has_issues:
+            self.configure(border_width=2, border_color="#D32F2F")
+        else:
+            self.configure(border_width=0)
+
+        if state is None:
+            if self.delete_status_label is not None:
+                self.delete_status_label.destroy()
+                self.delete_status_label = None
+        else:
+            text = (
+                "Deleting in background..."
+                if state == "deleting"
+                else "Queued for deletion"
+            )
+            if self.delete_status_label is None and self.info_container is not None:
+                self.delete_status_label = ctk.CTkLabel(
+                    self.info_container,
+                    text=text,
+                    font=ctk.CTkFont(size=11, weight="bold"),
+                    text_color="#FFA000",
+                    anchor="w",
+                )
+                self.delete_status_label.pack(anchor="nw", pady=(0, 2))
+            elif self.delete_status_label is not None:
+                self.delete_status_label.configure(text=text)
+
+        switch_text = (
+            "Deleting..."
+            if state == "deleting"
+            else "Queued"
+            if state == "queued"
+            else "Enabled"
+            if self.switch_var.get()
+            else "Disabled"
+        )
+        self.switch.configure(
+            text=switch_text, state="disabled" if is_delete_queued else "normal"
+        )
+        self.info_btn.configure(state="disabled" if is_delete_queued else "normal")
+        self.delete_btn.configure(
+            text="Deleting"
+            if state == "deleting"
+            else "Queued"
+            if state == "queued"
+            else "Delete",
+            state="disabled" if is_delete_queued else "normal",
+        )
+
+        if hasattr(self, "up_btn"):
+            self.up_btn.configure(state="disabled" if is_delete_queued else "normal")
+        if hasattr(self, "down_btn"):
+            self.down_btn.configure(state="disabled" if is_delete_queued else "normal")

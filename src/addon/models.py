@@ -43,6 +43,11 @@ def load_json_with_comments(file_path: Path) -> dict:
     """Load a JSON file that may contain JavaScript-style comments."""
     with open(file_path, "r", encoding="utf-8") as f:
         content = f.read()
+    return load_json_text_with_comments(content)
+
+
+def load_json_text_with_comments(content: str) -> dict:
+    """Load JSON text that may contain JavaScript-style comments."""
     cleaned = strip_json_comments(content)
     return json.loads(cleaned)
 
@@ -67,9 +72,9 @@ class Addon:
     description: str
     version: List[int]
     pack_type: PackType
-    path: Path
+    path: str
     enabled: bool = False
-    icon_path: Optional[Path] = None
+    icon_path: Optional[str] = None
     min_engine_version: List[int] = field(default_factory=lambda: [1, 0, 0])
     # Additional manifest fields
     author: str = ""
@@ -89,6 +94,14 @@ class Addon:
     def min_engine_version_string(self) -> str:
         """Get minimum engine version as a string."""
         return ".".join(str(v) for v in self.min_engine_version)
+
+    @property
+    def folder_name(self) -> str:
+        """Get the addon folder name from the stored path."""
+        normalized = str(self.path).replace("\\", "/").rstrip("/")
+        if not normalized:
+            return ""
+        return normalized.split("/")[-1]
 
     @classmethod
     def set_default_pack_uuids(cls, uuids: Set[str]) -> None:
@@ -173,11 +186,39 @@ class Addon:
     ) -> Optional["Addon"]:
         """Create an Addon instance from a manifest.json file."""
         try:
+            pack_dir = manifest_path.parent
             manifest = load_json_with_comments(manifest_path)
 
+            icon_path = None
+            for icon_name in ["pack_icon.png", "pack_icon.jpg"]:
+                potential_icon = pack_dir / icon_name
+                if potential_icon.exists():
+                    icon_path = potential_icon.as_posix()
+                    break
+
+            return cls.from_manifest_data(
+                manifest=manifest,
+                pack_type=pack_type,
+                pack_path=pack_dir.as_posix(),
+                icon_path=icon_path,
+                enabled=enabled,
+            )
+        except (json.JSONDecodeError, IOError, KeyError):
+            return None
+
+    @classmethod
+    def from_manifest_data(
+        cls,
+        manifest: dict,
+        pack_type: PackType,
+        pack_path: str,
+        icon_path: Optional[str] = None,
+        enabled: bool = False,
+    ) -> Optional["Addon"]:
+        """Create an Addon instance from already-loaded manifest content."""
+        try:
             header = manifest.get("header", {})
             metadata = manifest.get("metadata", {})
-            pack_dir = manifest_path.parent
 
             uuid = header.get("uuid", "")
             name = header.get("name", "Unknown Pack")
@@ -185,47 +226,28 @@ class Addon:
             version = header.get("version", [1, 0, 0])
             min_engine_version = header.get("min_engine_version", [1, 0, 0])
 
-            # Use folder name if manifest name is a placeholder
             if cls._is_placeholder_name(name):
-                name = pack_dir.name
+                name = str(pack_path).replace("\\", "/").rstrip("/").split("/")[-1]
 
-            # Ensure version is a list
             if isinstance(version, str):
                 version = [int(v) for v in version.split(".")]
 
-            # Check for pack icon
-            icon_path = None
-            for icon_name in ["pack_icon.png", "pack_icon.jpg"]:
-                potential_icon = pack_dir / icon_name
-                if potential_icon.exists():
-                    icon_path = potential_icon
-                    break
-
-            # Extract additional manifest fields
-            # Author: try header.author, then metadata.authors[0]
             author = header.get("author", "")
             if not author:
                 authors = metadata.get("authors", [])
                 if authors and isinstance(authors, list) and len(authors) > 0:
-                    # Authors can be strings or dicts with "name" field
                     first_author = authors[0]
                     if isinstance(first_author, str):
                         author = first_author
                     elif isinstance(first_author, dict):
                         author = first_author.get("name", "")
 
-            # URL: try header.url, then metadata.url
             url = header.get("url", "") or metadata.get("url", "")
-
-            # License: try header.license, then metadata.license
             license_str = header.get("license", "") or metadata.get("license", "")
-
-            # Dependencies, subpacks, capabilities from root
             dependencies = manifest.get("dependencies", [])
             subpacks = manifest.get("subpacks", [])
             capabilities = manifest.get("capabilities", [])
 
-            # Format version from root
             format_version = manifest.get("format_version", "")
             if isinstance(format_version, (int, float)):
                 format_version = str(format_version)
@@ -236,7 +258,7 @@ class Addon:
                 description=description,
                 version=version,
                 pack_type=pack_type,
-                path=pack_dir,
+                path=pack_path,
                 enabled=enabled,
                 icon_path=icon_path,
                 min_engine_version=min_engine_version,
@@ -248,7 +270,7 @@ class Addon:
                 capabilities=capabilities,
                 format_version=format_version,
             )
-        except (json.JSONDecodeError, IOError, KeyError):
+        except (ValueError, TypeError, KeyError):
             return None
 
     @staticmethod
@@ -314,23 +336,94 @@ class Addon:
             installed_uuids: Set of UUIDs of all installed addons.
 
         Returns:
-            List of dependency UUIDs that are not installed.
-            Excludes @minecraft/* script module dependencies.
+            List of dependency identifiers that are not installed.
+            Excludes Minecraft dependencies (shown separately in UI).
         """
         missing = []
         for dep in self.dependencies:
-            dep_uuid = dep.get("uuid", "")
-            module_name = dep.get("module_name", "")
-
-            # Skip @minecraft/* script module dependencies
-            if module_name.startswith("@minecraft/") or dep_uuid.startswith("@minecraft/"):
+            # Skip Minecraft dependencies (including beta API modules).
+            if not self.should_track_dependency(dep):
                 continue
 
+            dep_identifier = self.get_dependency_identifier(dep)
+
             # Check if this dependency is installed
-            if dep_uuid and dep_uuid not in installed_uuids:
-                missing.append(dep_uuid)
+            if dep_identifier and dep_identifier not in installed_uuids:
+                missing.append(dep_identifier)
 
         return missing
+
+    @staticmethod
+    def get_dependency_identifier(dep: dict) -> str:
+        """Return a stable identifier for a manifest dependency entry."""
+        if not isinstance(dep, dict):
+            return ""
+
+        dep_uuid = str(dep.get("uuid", "") or "").strip()
+        if dep_uuid:
+            return dep_uuid
+
+        module_name = str(dep.get("module_name", "") or "").strip()
+        if module_name:
+            return module_name
+
+        name = str(dep.get("name", "") or "").strip()
+        return name
+
+    @staticmethod
+    def is_minecraft_dependency(dep: dict) -> bool:
+        """Return True when a dependency entry targets Minecraft modules."""
+        if not isinstance(dep, dict):
+            return False
+
+        dep_uuid = str(dep.get("uuid", "") or "").lower()
+        module_name = str(dep.get("module_name", "") or "").lower()
+        name = str(dep.get("name", "") or "").lower()
+
+        return (
+            "minecraft" in dep_uuid
+            or "minecraft" in module_name
+            or name == "minecraft"
+        )
+
+    @staticmethod
+    def is_beta_dependency(dep: dict) -> bool:
+        """Return True when dependency version text contains 'beta'."""
+        if not isinstance(dep, dict):
+            return False
+
+        version = dep.get("version", "")
+        if isinstance(version, list):
+            version_text = ".".join(str(part) for part in version)
+        else:
+            version_text = str(version)
+
+        return "beta" in version_text.lower()
+
+    @classmethod
+    def should_track_dependency(cls, dep: dict) -> bool:
+        """Return True when a dependency should be validated as required."""
+        return not cls.is_minecraft_dependency(dep)
+
+    @classmethod
+    def is_minecraft_beta_dependency(cls, dep: dict) -> bool:
+        """Return True when dependency is Minecraft-related and targets beta."""
+        return cls.is_minecraft_dependency(dep) and cls.is_beta_dependency(dep)
+
+    def get_minecraft_beta_dependencies(self) -> List[str]:
+        """Get identifiers for Minecraft beta API dependencies."""
+        beta_deps: List[str] = []
+        for dep in self.dependencies:
+            if not self.is_minecraft_beta_dependency(dep):
+                continue
+            dep_identifier = self.get_dependency_identifier(dep)
+            if dep_identifier:
+                beta_deps.append(dep_identifier)
+        return beta_deps
+
+    def has_minecraft_beta_dependencies(self) -> bool:
+        """Check whether addon declares Minecraft beta API dependencies."""
+        return len(self.get_minecraft_beta_dependencies()) > 0
 
     def has_missing_dependencies(self, installed_uuids: Set[str]) -> bool:
         """Check if this addon has any missing dependencies.

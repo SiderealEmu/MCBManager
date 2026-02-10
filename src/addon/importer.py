@@ -7,14 +7,14 @@ import tempfile
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from ..config import config
-from ..server import get_server_version
-from .models import Addon, PackType, load_json_with_comments
+from ..server import get_server_version, server_fs
+from .models import Addon, PackType, load_json_text_with_comments, load_json_with_comments
 
-# Progress callback type: (current_step, total_steps, message)
-ProgressCallback = Callable[[int, int, str], None]
+# Progress callback type: (current_step, total_steps, message, optional_step_progress)
+ProgressCallback = Callable[[int, int, str, Optional[Dict[str, object]]], None]
 
 
 @dataclass
@@ -25,12 +25,15 @@ class ImportResult:
     message: str
     imported_packs: List[Tuple[str, PackType]] = None
     warnings: List[str] = None
+    details: List[str] = None
 
     def __post_init__(self):
         if self.imported_packs is None:
             self.imported_packs = []
         if self.warnings is None:
             self.warnings = []
+        if self.details is None:
+            self.details = []
 
 
 class AddonImporter:
@@ -120,82 +123,170 @@ class AddonImporter:
         """
         file_path = Path(file_path)
 
-        def report_progress(step: int, total: int, message: str) -> None:
-            if progress_callback:
-                progress_callback(step, total, message)
+        details: List[str] = []
+        emitted_transfer_lines = set()
+        progress_total = 6
+        progress_step = 0
+        current_status_message = "Starting..."
 
-        report_progress(0, 5, "Validating file...")
+        def add_detail(message: str) -> None:
+            details.append(message)
+
+        def update_progress(message: str, advance: bool = True) -> None:
+            nonlocal progress_step, current_status_message
+            if advance:
+                progress_step += 1
+            current_status_message = message
+            add_detail(message)
+            if progress_callback:
+                progress_callback(progress_step, progress_total, message, None)
+
+        def set_progress_total(total: int) -> None:
+            nonlocal progress_total
+            progress_total = max(total, progress_step + 1)
+
+        def emit_step_progress(
+            step_name: str, current: int, total: int, label: str
+        ) -> None:
+            if not progress_callback:
+                return
+            progress_callback(
+                progress_step,
+                progress_total,
+                current_status_message,
+                {
+                    "step_name": step_name,
+                    "current": int(current),
+                    "total": int(total if total > 0 else 1),
+                    "label": label,
+                },
+            )
+
+        def emit_transfer_line(line: str) -> None:
+            message = f"Transfer: {line}"
+            if message in emitted_transfer_lines:
+                return
+            emitted_transfer_lines.add(message)
+            update_progress(message, advance=False)
+
+        update_progress("Preparing import...", advance=False)
+        add_detail(f"Input file: {file_path.name}")
+        add_detail(f"File extension: {file_path.suffix.lower()}")
+        update_progress("Validating file...")
 
         if not file_path.exists():
-            return ImportResult(False, f"File not found: {file_path}")
+            add_detail("Validation failed: input file does not exist.")
+            return ImportResult(False, f"File not found: {file_path}", details=details)
 
         if not cls.can_import(file_path):
+            add_detail("Validation failed: unsupported file type.")
             return ImportResult(
                 False,
                 f"Unsupported file type: {file_path.suffix}. "
                 f"Supported: {', '.join(cls.SUPPORTED_EXTENSIONS)}",
+                details=details,
             )
 
         if not config.is_server_configured():
-            return ImportResult(False, "Server path not configured")
+            add_detail("Validation failed: server is not configured.")
+            return ImportResult(False, "Server path not configured", details=details)
 
         # Get the base name from the file for naming packs with generic names
         base_name = file_path.stem
+        add_detail(f"Using base pack name: {base_name}")
 
         # Create temp directory for extraction
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
+            add_detail(f"Temporary extraction directory: {temp_path}")
 
-            report_progress(1, 5, "Extracting archive...")
+            update_progress("Extracting archive...")
 
             # Extract or copy the file
             if cls._is_archive(file_path):
                 try:
                     cls._extract_archive(file_path, temp_path)
+                    add_detail("Archive extraction completed.")
                 except Exception as e:
-                    return ImportResult(False, f"Failed to extract archive: {e}")
+                    add_detail(f"Archive extraction failed: {e}")
+                    return ImportResult(
+                        False, f"Failed to extract archive: {e}", details=details
+                    )
             else:
-                return ImportResult(False, "File is not a valid archive")
+                add_detail("Validation failed: file is not a valid archive.")
+                return ImportResult(False, "File is not a valid archive", details=details)
 
-            report_progress(2, 5, "Processing nested packs...")
+            update_progress("Processing nested packs...")
 
             # Check for any .mcpack files that need extraction
             # This handles .mcaddon files (which contain .mcpack files) as well as
             # .zip files that may contain .mcpack files
             mcpack_files = list(temp_path.rglob("*.mcpack"))
+            add_detail(f"Nested .mcpack files found: {len(mcpack_files)}")
             if mcpack_files:
-                success, error_msg = cls._extract_nested_mcpacks(temp_path, base_name)
-                if not success:
-                    return ImportResult(False, error_msg)
+                set_progress_total(progress_total + len(mcpack_files))
 
-            report_progress(3, 5, "Scanning for packs...")
+                def nested_status(message: str) -> None:
+                    set_progress_total(progress_total + 1)
+                    update_progress(message)
+
+                success, error_msg = cls._extract_nested_mcpacks(
+                    temp_path, base_name, status_callback=nested_status
+                )
+                if not success:
+                    add_detail(f"Nested extraction failed: {error_msg}")
+                    return ImportResult(False, error_msg, details=details)
+                add_detail("Nested .mcpack extraction completed.")
+
+            update_progress("Scanning for packs...")
 
             # Find and process all packs in the extracted content
             packs_found = cls._find_packs(temp_path)
+            add_detail(f"Pack folders detected: {len(packs_found)}")
 
             if not packs_found:
-                return ImportResult(False, "No valid addon packs found in the file")
+                add_detail("No valid packs were detected from extracted content.")
+                return ImportResult(
+                    False, "No valid addon packs found in the file", details=details
+                )
 
-            report_progress(4, 5, f"Installing {len(packs_found)} pack(s)...")
+            set_progress_total(progress_total + len(packs_found))
+            update_progress(f"Installing {len(packs_found)} pack(s)...")
 
             # Import each pack
             imported = []
             errors = []
             compatibility_warnings = []
 
-            for pack_path, pack_type in packs_found:
-                success, result_msg, compat_warning = cls._install_pack(
-                    pack_path, pack_type, base_name
+            for index, (pack_path, pack_type) in enumerate(packs_found, 1):
+                update_progress(
+                    f"Installing pack {index}/{len(packs_found)}: {pack_path.name} ({pack_type.value})"
                 )
+                success, result_msg, compat_warning, _transfer_log = cls._install_pack(
+                    pack_path,
+                    pack_type,
+                    base_name,
+                    detail_callback=emit_transfer_line,
+                    transfer_progress_callback=emit_step_progress,
+                )
+                for transfer_line in _transfer_log:
+                    emit_transfer_line(transfer_line)
                 if success:
                     # result_msg contains the actual folder name used
                     imported.append((result_msg, pack_type))
+                    add_detail(
+                        f"Installed {pack_type.value} pack as folder: {result_msg}"
+                    )
                     if compat_warning:
                         compatibility_warnings.append(compat_warning)
+                        add_detail(f"Compatibility warning: {compat_warning}")
                 else:
                     errors.append(result_msg)
+                    add_detail(
+                        f"Failed to install {pack_type.value} pack ({pack_path.name}): {result_msg}"
+                    )
 
-            report_progress(5, 5, "Finalizing...")
+            update_progress("Finalizing import...")
 
             if imported:
                 # Build a clean, organized message
@@ -220,11 +311,23 @@ class AddonImporter:
                     lines.append(f"\nWarnings: {'; '.join(errors)}")
 
                 message = "\n".join(lines)
+                add_detail(
+                    f"Import complete: {len(imported)} installed, {len(errors)} failed."
+                )
                 return ImportResult(
-                    True, message, imported, warnings=compatibility_warnings
+                    True,
+                    message,
+                    imported,
+                    warnings=compatibility_warnings,
+                    details=details,
                 )
             else:
-                return ImportResult(False, f"Failed to import: {'; '.join(errors)}")
+                add_detail("Import failed: no packs were installed.")
+                return ImportResult(
+                    False,
+                    f"Failed to import: {'; '.join(errors)}",
+                    details=details,
+                )
 
     @staticmethod
     def _is_archive(file_path: Path) -> bool:
@@ -242,7 +345,11 @@ class AddonImporter:
 
     @classmethod
     def _extract_nested_mcpacks(
-        cls, extract_path: Path, base_name: str, max_depth: int = 3
+        cls,
+        extract_path: Path,
+        base_name: str,
+        max_depth: int = 3,
+        status_callback: Optional[Callable[[str], None]] = None,
     ) -> Tuple[bool, Optional[str]]:
         """Extract nested .mcpack files found in .mcaddon archives.
 
@@ -299,6 +406,10 @@ class AddonImporter:
                 )
 
             for mcpack_file in mcpack_files:
+                if status_callback:
+                    status_callback(
+                        f"Extracting nested .mcpack (depth {current_depth}): {mcpack_file.name}"
+                    )
                 if not cls._is_archive(mcpack_file):
                     # Not a valid archive, remove it to avoid confusion
                     try:
@@ -377,28 +488,39 @@ class AddonImporter:
 
     @classmethod
     def _install_pack(
-        cls, pack_path: Path, pack_type: PackType, base_name: str = None
-    ) -> Tuple[bool, str, Optional[str]]:
+        cls,
+        pack_path: Path,
+        pack_type: PackType,
+        base_name: str = None,
+        detail_callback: Optional[Callable[[str], None]] = None,
+        transfer_progress_callback: Optional[
+            Callable[[str, int, int, str], None]
+        ] = None,
+    ) -> Tuple[bool, str, Optional[str], List[str]]:
         """Install a pack to the appropriate server directory.
 
         Returns:
-            Tuple of (success, message, compatibility_warning).
+            Tuple of (success, message, compatibility_warning, transfer_log).
             - success: Whether the pack was installed
             - message: Pack folder name on success, error message on failure
             - compatibility_warning: Warning if addon may not be compatible, None otherwise
+            - transfer_log: Details about copy/compression/upload/extraction steps
         """
         if pack_type == PackType.BEHAVIOR:
-            dest_base = config.get_behavior_packs_path()
+            dest_base = "behavior_packs"
         elif pack_type == PackType.RESOURCE:
-            dest_base = config.get_resource_packs_path()
+            dest_base = "resource_packs"
         else:
-            return False, "Unknown pack type", None
+            return False, "Unknown pack type", None, []
 
-        if not dest_base:
-            return False, "Server pack directory not configured", None
+        if not server_fs.is_configured():
+            return False, "Server pack directory not configured", None, []
 
         # Ensure destination directory exists
-        dest_base.mkdir(parents=True, exist_ok=True)
+        try:
+            server_fs.mkdirs(dest_base)
+        except Exception:
+            return False, "Failed to create destination pack directory", None, []
 
         # Check version compatibility from manifest
         compatibility_warning = None
@@ -425,18 +547,18 @@ class AddonImporter:
 
         # Get pack name for folder, using base_name for generic names
         pack_name = cls._get_pack_folder_name(pack_path, pack_type, base_name)
-        dest_path = dest_base / pack_name
+        dest_path = server_fs.join(dest_base, pack_name)
 
         # Handle existing pack
-        if dest_path.exists():
+        if server_fs.exists(dest_path):
             # Check if it's the same pack (by UUID)
-            existing_manifest = dest_path / "manifest.json"
+            existing_manifest = server_fs.join(dest_path, "manifest.json")
             new_manifest = pack_path / "manifest.json"
 
-            if existing_manifest.exists() and new_manifest.exists():
+            if server_fs.exists(existing_manifest) and new_manifest.exists():
                 try:
                     existing_uuid = (
-                        load_json_with_comments(existing_manifest)
+                        load_json_text_with_comments(server_fs.read_text(existing_manifest))
                         .get("header", {})
                         .get("uuid", "")
                     )
@@ -448,23 +570,63 @@ class AddonImporter:
 
                     if existing_uuid == new_uuid:
                         # Same pack, update it
-                        shutil.rmtree(dest_path)
+                        if not server_fs.delete_tree(dest_path):
+                            return False, "Failed to replace existing pack", None, []
                     else:
                         # Different pack, use unique name
                         counter = 1
-                        while dest_path.exists():
-                            dest_path = dest_base / f"{pack_name}_{counter}"
+                        while server_fs.exists(dest_path):
+                            dest_path = server_fs.join(dest_base, f"{pack_name}_{counter}")
                             counter += 1
                 except Exception:
                     pass
 
         # Copy the pack
         try:
-            shutil.copytree(pack_path, dest_path)
+            threshold = server_fs.SFTP_ARCHIVE_FILE_THRESHOLD
+            pack_file_count = cls._count_pack_files(pack_path, stop_after=threshold)
+            if detail_callback:
+                if server_fs.is_sftp_mode():
+                    mode = (
+                        "archive upload"
+                        if pack_file_count > threshold
+                        else "direct SFTP upload"
+                    )
+                    if pack_file_count > threshold:
+                        count_display = f">{threshold}"
+                    else:
+                        count_display = str(pack_file_count)
+                    detail_callback(
+                        f"Precheck: pack has {count_display} files (threshold {threshold}) -> {mode}"
+                    )
+                else:
+                    detail_callback(
+                        f"Precheck: pack has {pack_file_count} files; local transfer mode (no SFTP compression)."
+                    )
+
+            transfer_log = server_fs.copy_dir_from_local(
+                pack_path,
+                dest_path,
+                event_callback=detail_callback,
+                progress_callback=transfer_progress_callback,
+            )
             # Return the actual folder name used (for display purposes)
-            return True, dest_path.name, compatibility_warning
+            return True, dest_path.split("/")[-1], compatibility_warning, transfer_log
         except Exception as e:
-            return False, f"Failed to copy pack: {e}", None
+            return False, f"Failed to copy pack: {e}", None, []
+
+    @staticmethod
+    def _count_pack_files(pack_path: Path, stop_after: Optional[int] = None) -> int:
+        """Count files recursively in a pack directory.
+
+        If `stop_after` is set, counting stops once the count exceeds it.
+        """
+        count = 0
+        for _root, _dirs, files in os.walk(pack_path):
+            count += len(files)
+            if stop_after is not None and count > stop_after:
+                return count
+        return count
 
     @staticmethod
     def _get_pack_name(pack_path: Path) -> str:
@@ -560,32 +722,85 @@ class AddonImporter:
         """
         folder_path = Path(folder_path)
 
-        def report_progress(step: int, total: int, message: str) -> None:
-            if progress_callback:
-                progress_callback(step, total, message)
+        details: List[str] = []
+        emitted_transfer_lines = set()
+        progress_total = 5
+        progress_step = 0
+        current_status_message = "Starting..."
 
-        report_progress(0, 4, "Validating folder...")
+        def add_detail(message: str) -> None:
+            details.append(message)
+
+        def update_progress(message: str, advance: bool = True) -> None:
+            nonlocal progress_step, current_status_message
+            if advance:
+                progress_step += 1
+            current_status_message = message
+            add_detail(message)
+            if progress_callback:
+                progress_callback(progress_step, progress_total, message, None)
+
+        def set_progress_total(total: int) -> None:
+            nonlocal progress_total
+            progress_total = max(total, progress_step + 1)
+
+        def emit_step_progress(
+            step_name: str, current: int, total: int, label: str
+        ) -> None:
+            if not progress_callback:
+                return
+            progress_callback(
+                progress_step,
+                progress_total,
+                current_status_message,
+                {
+                    "step_name": step_name,
+                    "current": int(current),
+                    "total": int(total if total > 0 else 1),
+                    "label": label,
+                },
+            )
+
+        def emit_transfer_line(line: str) -> None:
+            message = f"Transfer: {line}"
+            if message in emitted_transfer_lines:
+                return
+            emitted_transfer_lines.add(message)
+            update_progress(message, advance=False)
+
+        update_progress("Preparing folder import...", advance=False)
+        add_detail(f"Input folder: {folder_path}")
+        update_progress("Validating folder...")
 
         if not folder_path.exists() or not folder_path.is_dir():
-            return ImportResult(False, "Invalid folder path")
+            add_detail("Validation failed: folder path is invalid.")
+            return ImportResult(False, "Invalid folder path", details=details)
 
         if not config.is_server_configured():
-            return ImportResult(False, "Server path not configured")
+            add_detail("Validation failed: server is not configured.")
+            return ImportResult(False, "Server path not configured", details=details)
 
-        report_progress(1, 4, "Scanning for addon files and packs...")
+        update_progress("Scanning for addon files and packs...")
 
         # First, check if this folder itself is a pack (has manifest.json)
         packs_found = cls._find_packs(folder_path)
+        add_detail(f"Pack folders detected directly: {len(packs_found)}")
 
         # Also look for addon files (.mcaddon, .mcpack, .zip) in the folder
         addon_files = []
         for ext in cls.SUPPORTED_EXTENSIONS:
             addon_files.extend(folder_path.glob(f"*{ext}"))
+        add_detail(f"Addon archives detected: {len(addon_files)}")
+        base_steps = 3 + (1 if addon_files else 0) + (1 if packs_found else 0)
+        set_progress_total(base_steps + len(addon_files) + len(packs_found))
 
         # If no packs found directly and no addon files, nothing to import
         if not packs_found and not addon_files:
+            add_detail("No supported files or pack folders were found.")
             return ImportResult(
-                False, "No valid addon packs or addon files found in the folder"
+                False,
+                "No valid addon packs or addon files found in the folder",
+                details=details,
             )
 
         imported = []
@@ -594,35 +809,62 @@ class AddonImporter:
 
         # Import any addon files found
         if addon_files:
-            total_steps = len(addon_files) + 2
-            for i, addon_file in enumerate(addon_files):
-                report_progress(2 + i, total_steps, f"Importing {addon_file.name}...")
+            update_progress(f"Processing {len(addon_files)} addon archive(s)...")
+            for index, addon_file in enumerate(addon_files, 1):
+                update_progress(
+                    f"Importing archive {index}/{len(addon_files)}: {addon_file.name}"
+                )
                 # Import each addon file (this handles .mcaddon, .mcpack, .zip)
-                result = cls.import_addon(addon_file, progress_callback=None)
+                result = cls.import_addon(
+                    addon_file,
+                    progress_callback=lambda _step, _total, message, _step_info, name=addon_file.name: update_progress(
+                        f"{name}: {message}", advance=False
+                    ),
+                )
+                details.append(f"Archive report for {addon_file.name}:")
+                details.extend([f"  {line}" for line in result.details])
                 if result.success:
                     imported.extend(result.imported_packs)
                     if result.warnings:
                         compatibility_warnings.extend(result.warnings)
+                    add_detail(
+                        f"Archive import succeeded: {addon_file.name} ({len(result.imported_packs)} pack(s))."
+                    )
                 else:
                     errors.append(f"{addon_file.name}: {result.message}")
+                    add_detail(f"Archive import failed: {addon_file.name} ({result.message}).")
 
         # Import any pack folders found directly
         if packs_found:
             base_name = folder_path.name
-            report_progress(3, 4, f"Installing {len(packs_found)} pack folder(s)...")
+            update_progress(f"Installing {len(packs_found)} pack folder(s)...")
 
-            for pack_path, pack_type in packs_found:
-                success, result_msg, compat_warning = cls._install_pack(
-                    pack_path, pack_type, base_name
+            for index, (pack_path, pack_type) in enumerate(packs_found, 1):
+                update_progress(
+                    f"Installing folder pack {index}/{len(packs_found)}: {pack_path.name} ({pack_type.value})"
                 )
+                success, result_msg, compat_warning, _transfer_log = cls._install_pack(
+                    pack_path,
+                    pack_type,
+                    base_name,
+                    detail_callback=emit_transfer_line,
+                    transfer_progress_callback=emit_step_progress,
+                )
+                for transfer_line in _transfer_log:
+                    emit_transfer_line(transfer_line)
                 if success:
                     imported.append((result_msg, pack_type))
+                    add_detail(
+                        f"Installed folder pack {pack_path.name} as {result_msg} ({pack_type.value})."
+                    )
                     if compat_warning:
                         compatibility_warnings.append(compat_warning)
+                        add_detail(f"Compatibility warning: {compat_warning}")
                 else:
                     errors.append(result_msg)
+                    add_detail(f"Failed to install folder pack {pack_path.name}: {result_msg}")
 
-        report_progress(4, 4, "Finalizing...")
+        update_progress("Finalizing folder import...")
 
         if imported:
             # Build a clean, organized message
@@ -647,8 +889,18 @@ class AddonImporter:
                 lines.append(f"\nWarnings: {'; '.join(errors)}")
 
             message = "\n".join(lines)
+            add_detail(
+                f"Folder import complete: {len(imported)} installed, {len(errors)} failed."
+            )
             return ImportResult(
-                True, message, imported, warnings=compatibility_warnings
+                True,
+                message,
+                imported,
+                warnings=compatibility_warnings,
+                details=details,
             )
         else:
-            return ImportResult(False, f"Failed to import: {'; '.join(errors)}")
+            add_detail("Folder import failed: no packs were installed.")
+            return ImportResult(
+                False, f"Failed to import: {'; '.join(errors)}", details=details
+            )

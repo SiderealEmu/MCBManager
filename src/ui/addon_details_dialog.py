@@ -4,12 +4,15 @@ import subprocess
 import sys
 import webbrowser
 from pathlib import Path
+from tkinter import messagebox
 from typing import Dict, Optional
 
 import customtkinter as ctk
 from PIL import Image
 
 from ..addon import Addon, AddonManager, PackType
+from ..config import config
+from ..server import server_fs
 from .main_window import set_dialog_icon
 
 
@@ -31,6 +34,7 @@ class AddonDetailsDialog(ctk.CTkToplevel):
 
         self.addon = addon
         self.addon_manager = addon_manager
+        self.default_changed = False
         self._installed_addons_by_uuid: Dict[str, Addon] = {}
         self._build_uuid_lookup()
 
@@ -84,8 +88,13 @@ class AddonDetailsDialog(ctk.CTkToplevel):
         icon_frame.grid(row=0, column=0, rowspan=2, padx=10, pady=10)
         icon_frame.grid_propagate(False)
 
-        if self.addon.icon_path and self.addon.icon_path.exists():
-            photo = get_icon(self.addon.icon_path)
+        icon_file = (
+            server_fs.get_local_file_copy(self.addon.icon_path)
+            if self.addon.icon_path
+            else None
+        )
+        if icon_file:
+            photo = get_icon(icon_file)
             if photo:
                 icon_label = ctk.CTkLabel(icon_frame, image=photo, text="")
                 icon_label.place(relx=0.5, rely=0.5, anchor="center")
@@ -254,7 +263,7 @@ class AddonDetailsDialog(ctk.CTkToplevel):
         path_frame = ctk.CTkFrame(details_frame, fg_color="transparent")
         path_frame.grid(row=detail_row, column=1, sticky="w", pady=2)
 
-        path_text = str(self.addon.path)
+        path_text = server_fs.get_addon_display_path(self.addon.path)
         path_value = ctk.CTkLabel(
             path_frame,
             text=self._truncate_text(path_text, 30),
@@ -263,14 +272,41 @@ class AddonDetailsDialog(ctk.CTkToplevel):
         )
         path_value.pack(side="left")
 
+        open_folder_text = "Copy Path" if config.connection_type == "sftp" else "Open Folder"
         open_folder_btn = ctk.CTkButton(
             path_frame,
-            text="Open Folder",
+            text=open_folder_text,
             width=80,
             height=24,
             command=self._open_folder,
         )
         open_folder_btn.pack(side="left", padx=(10, 0))
+        detail_row += 1
+
+        # Default-addon row
+        default_label = ctk.CTkLabel(
+            details_frame,
+            text="Default Addon:",
+            font=ctk.CTkFont(weight="bold"),
+            anchor="w",
+        )
+        default_label.grid(row=detail_row, column=0, sticky="w", pady=2)
+
+        default_frame = ctk.CTkFrame(details_frame, fg_color="transparent")
+        default_frame.grid(row=detail_row, column=1, sticky="w", pady=2)
+
+        self.default_state_label = ctk.CTkLabel(default_frame, text="", anchor="w")
+        self.default_state_label.pack(side="left")
+
+        self.set_default_btn = ctk.CTkButton(
+            default_frame,
+            text="Set as Default",
+            width=110,
+            height=24,
+            command=self._set_as_default,
+        )
+        self.set_default_btn.pack(side="left", padx=(10, 0))
+        self._refresh_default_controls()
         detail_row += 1
 
         # Capabilities section (if any)
@@ -287,12 +323,10 @@ class AddonDetailsDialog(ctk.CTkToplevel):
             )
             caps_label.pack(fill="x", padx=10, pady=(0, 10))
 
-        # Dependencies section (if any, excluding Minecraft script modules)
-        # Filter out @minecraft/* module dependencies (script API modules)
+        # Dependencies section (if any, excluding Minecraft modules)
         pack_dependencies = [
             dep for dep in self.addon.dependencies
-            if not dep.get("module_name", "").startswith("@minecraft/")
-            and not dep.get("uuid", "").startswith("@minecraft/")
+            if self.addon.should_track_dependency(dep)
         ]
 
         if pack_dependencies:
@@ -302,7 +336,7 @@ class AddonDetailsDialog(ctk.CTkToplevel):
             row += 1
 
             for dep in pack_dependencies:
-                dep_uuid = dep.get("uuid", "Unknown")
+                dep_identifier = self.addon.get_dependency_identifier(dep) or "Unknown"
                 dep_version = dep.get("version", [])
                 if isinstance(dep_version, list):
                     dep_version_str = ".".join(str(v) for v in dep_version)
@@ -310,7 +344,7 @@ class AddonDetailsDialog(ctk.CTkToplevel):
                     dep_version_str = str(dep_version)
 
                 # Check if dependency is installed
-                installed_addon = self._get_installed_addon(dep_uuid)
+                installed_addon = self._get_installed_addon(dep_identifier)
 
                 # Create a row frame for this dependency
                 dep_row_frame = ctk.CTkFrame(deps_section, fg_color="transparent")
@@ -319,8 +353,13 @@ class AddonDetailsDialog(ctk.CTkToplevel):
                 if installed_addon:
                     # Dependency is installed - show icon and name
                     icon_size = (24, 24)
-                    if installed_addon.icon_path and installed_addon.icon_path.exists():
-                        photo = get_icon(installed_addon.icon_path, icon_size)
+                    installed_icon = (
+                        server_fs.get_local_file_copy(installed_addon.icon_path)
+                        if installed_addon.icon_path
+                        else None
+                    )
+                    if installed_icon:
+                        photo = get_icon(installed_icon, icon_size)
                         if photo:
                             icon_label = ctk.CTkLabel(
                                 dep_row_frame, image=photo, text=""
@@ -358,7 +397,7 @@ class AddonDetailsDialog(ctk.CTkToplevel):
                     )
                     warning_label.pack(side="left", padx=(0, 8))
 
-                    dep_text = f"{dep_uuid}"
+                    dep_text = dep_identifier
                     if dep_version_str:
                         dep_text += f" (v{dep_version_str})"
 
@@ -504,12 +543,56 @@ class AddonDetailsDialog(ctk.CTkToplevel):
         self.after(1500, lambda: self.copy_uuid_btn.configure(text="Copy"))
 
     def _open_folder(self) -> None:
-        """Open the addon folder in the file explorer."""
-        path = self.addon.path
-        if path.exists():
+        """Open the addon folder in the file explorer, or copy remote path."""
+        if config.connection_type == "sftp":
+            remote_path = server_fs.get_addon_display_path(self.addon.path)
+            self.clipboard_clear()
+            self.clipboard_append(remote_path)
+            messagebox.showinfo("Path Copied", "Remote addon path copied to clipboard.")
+            return
+
+        local_path = server_fs.get_local_absolute_path(self.addon.path)
+        if local_path and local_path.exists():
             if sys.platform == "win32":
-                subprocess.run(["explorer", str(path)], check=False)
+                subprocess.run(["explorer", str(local_path)], check=False)
             elif sys.platform == "darwin":
-                subprocess.run(["open", str(path)], check=False)
+                subprocess.run(["open", str(local_path)], check=False)
             else:
-                subprocess.run(["xdg-open", str(path)], check=False)
+                subprocess.run(["xdg-open", str(local_path)], check=False)
+
+    def _refresh_default_controls(self) -> None:
+        """Refresh default-addon status controls."""
+        if self.addon.is_default:
+            self.default_state_label.configure(text="Yes", text_color="#00C853")
+            self.set_default_btn.configure(text="Already Default", state="disabled")
+        else:
+            self.default_state_label.configure(text="No", text_color="gray")
+            self.set_default_btn.configure(text="Set as Default", state="normal")
+
+    def _set_as_default(self) -> None:
+        """Mark this addon as a default addon."""
+        if self.addon.is_default:
+            return
+
+        default_uuids = list(config.default_pack_uuids)
+        if self.addon.uuid not in default_uuids:
+            default_uuids.append(self.addon.uuid)
+            config.default_pack_uuids = default_uuids
+            config.default_packs_detected = True
+            Addon.set_default_pack_uuids(set(default_uuids))
+            self.default_changed = True
+
+        self._refresh_default_controls()
+        self._refresh_parent_after_default_change()
+        messagebox.showinfo(
+            "Default Addon Updated",
+            f"'{self.addon.name}' is now marked as a default addon.",
+        )
+
+    def _refresh_parent_after_default_change(self) -> None:
+        """Refresh addon list in the parent window after default updates."""
+        try:
+            if hasattr(self.master, "addon_panel"):
+                self.master.addon_panel.refresh()
+        except Exception:
+            pass

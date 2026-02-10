@@ -1,17 +1,34 @@
 """Configuration management for the addon manager."""
 
 import json
-import os
 import threading
 from pathlib import Path
 from typing import Optional
+
+try:
+    import keyring
+except Exception:  # pragma: no cover - import-time environment differences
+    keyring = None
+
+
+KEYRING_SERVICE_NAME = "MCBManager"
+SFTP_PASSWORD_KEYRING_ACCOUNT = "sftp_password"
 
 
 class Config:
     """Manages application configuration persistence with debounced saves."""
 
     DEFAULT_CONFIG = {
+        "connection_type": "local",
         "server_path": "",
+        "sftp_host": "",
+        "sftp_port": 22,
+        "sftp_username": "",
+        "sftp_password": "",
+        "sftp_key_file": "",
+        "sftp_remote_path": "",
+        "sftp_timeout": 10,
+        "sftp_status_host": "",
         "theme": "dark",
         "window_width": 1200,
         "window_height": 800,
@@ -30,6 +47,7 @@ class Config:
         self._save_lock = threading.Lock()
         self._dirty = False
         self._load()
+        self._migrate_legacy_sftp_password()
 
     def _load(self) -> None:
         """Load configuration from file."""
@@ -40,6 +58,55 @@ class Config:
                     self._config.update(loaded)
             except (json.JSONDecodeError, IOError):
                 pass
+
+    @staticmethod
+    def _is_keyring_available() -> bool:
+        """Return True if keyring is importable in this environment."""
+        return keyring is not None
+
+    def _get_sftp_password_from_keyring(self) -> Optional[str]:
+        """Read SFTP password from the OS credential store."""
+        if not self._is_keyring_available():
+            return None
+
+        try:
+            value = keyring.get_password(
+                KEYRING_SERVICE_NAME, SFTP_PASSWORD_KEYRING_ACCOUNT
+            )
+            return value or ""
+        except Exception:
+            return None
+
+    def _set_sftp_password_in_keyring(self, password: str) -> bool:
+        """Write/delete SFTP password in the OS credential store."""
+        if not self._is_keyring_available():
+            return False
+
+        try:
+            if password:
+                keyring.set_password(
+                    KEYRING_SERVICE_NAME, SFTP_PASSWORD_KEYRING_ACCOUNT, password
+                )
+            else:
+                try:
+                    keyring.delete_password(
+                        KEYRING_SERVICE_NAME, SFTP_PASSWORD_KEYRING_ACCOUNT
+                    )
+                except Exception:
+                    pass
+            return True
+        except Exception:
+            return False
+
+    def _migrate_legacy_sftp_password(self) -> None:
+        """Move any legacy plaintext SFTP password to keyring if possible."""
+        legacy_password = self._config.get("sftp_password", "") or ""
+        if not legacy_password:
+            return
+
+        if self._set_sftp_password_in_keyring(legacy_password):
+            self._config.pop("sftp_password", None)
+            self.save_now()
 
     def _schedule_save(self) -> None:
         """Schedule a debounced save operation."""
@@ -93,6 +160,140 @@ class Config:
         self.save()
 
     @property
+    def connection_type(self) -> str:
+        """Get active server connection type ('local' or 'sftp')."""
+        value = str(self._config.get("connection_type", "local")).lower().strip()
+        return value if value in {"local", "sftp"} else "local"
+
+    @connection_type.setter
+    def connection_type(self, value: str) -> None:
+        """Set active server connection type."""
+        normalized = str(value).lower().strip()
+        self._config["connection_type"] = "sftp" if normalized == "sftp" else "local"
+        self.save()
+
+    @property
+    def sftp_host(self) -> str:
+        """Get configured SFTP host."""
+        return self._config.get("sftp_host", "")
+
+    @sftp_host.setter
+    def sftp_host(self, value: str) -> None:
+        """Set SFTP host."""
+        self._config["sftp_host"] = value.strip()
+        self.save()
+
+    @property
+    def sftp_port(self) -> int:
+        """Get configured SFTP port."""
+        try:
+            return int(self._config.get("sftp_port", 22))
+        except (TypeError, ValueError):
+            return 22
+
+    @sftp_port.setter
+    def sftp_port(self, value: int) -> None:
+        """Set SFTP port."""
+        try:
+            port = int(value)
+        except (TypeError, ValueError):
+            port = 22
+        self._config["sftp_port"] = max(1, min(65535, port))
+        self.save()
+
+    @property
+    def sftp_username(self) -> str:
+        """Get configured SFTP username."""
+        return self._config.get("sftp_username", "")
+
+    @sftp_username.setter
+    def sftp_username(self, value: str) -> None:
+        """Set SFTP username."""
+        self._config["sftp_username"] = value.strip()
+        self.save()
+
+    @property
+    def sftp_password(self) -> str:
+        """Get configured SFTP password."""
+        password = self._get_sftp_password_from_keyring()
+        if password is not None:
+            return password
+        return self._config.get("sftp_password", "")
+
+    @sftp_password.setter
+    def sftp_password(self, value: str) -> None:
+        """Set SFTP password."""
+        password = value or ""
+        if self._set_sftp_password_in_keyring(password):
+            if "sftp_password" in self._config:
+                self._config.pop("sftp_password", None)
+                self.save()
+            return
+
+        # Fallback for environments without keyring support.
+        self._config["sftp_password"] = password
+        self.save()
+
+    @property
+    def sftp_key_file(self) -> str:
+        """Get configured SFTP private key file path."""
+        return self._config.get("sftp_key_file", "")
+
+    @sftp_key_file.setter
+    def sftp_key_file(self, value: str) -> None:
+        """Set SFTP private key file path."""
+        self._config["sftp_key_file"] = value.strip()
+        self.save()
+
+    @property
+    def sftp_remote_path(self) -> str:
+        """Get configured SFTP server root path."""
+        return self._config.get("sftp_remote_path", "")
+
+    @sftp_remote_path.setter
+    def sftp_remote_path(self, value: str) -> None:
+        """Set SFTP server root path."""
+        self._config["sftp_remote_path"] = (value or "").strip()
+        self.save()
+
+    @property
+    def sftp_timeout(self) -> int:
+        """Get SFTP connection timeout (seconds)."""
+        try:
+            timeout = int(self._config.get("sftp_timeout", 10))
+            return max(3, min(60, timeout))
+        except (TypeError, ValueError):
+            return 10
+
+    @sftp_timeout.setter
+    def sftp_timeout(self, value: int) -> None:
+        """Set SFTP connection timeout (seconds)."""
+        try:
+            timeout = int(value)
+        except (TypeError, ValueError):
+            timeout = 10
+        self._config["sftp_timeout"] = max(3, min(60, timeout))
+        self.save()
+
+    @property
+    def sftp_status_host(self) -> str:
+        """Get optional status query host override for SFTP mode."""
+        return self._config.get("sftp_status_host", "")
+
+    @sftp_status_host.setter
+    def sftp_status_host(self, value: str) -> None:
+        """Set optional status query host override for SFTP mode."""
+        self._config["sftp_status_host"] = (value or "").strip()
+        self.save()
+
+    @property
+    def server_status_host(self) -> str:
+        """Get host to use for Bedrock status queries."""
+        if self.connection_type == "sftp":
+            return self.sftp_status_host or self.sftp_host or "localhost"
+        return "localhost"
+
+    @property
     def theme(self) -> str:
         """Get the UI theme."""
         return self._config.get("theme", "dark")
@@ -127,6 +328,9 @@ class Config:
 
     def is_server_configured(self) -> bool:
         """Check if a valid server path is configured."""
+        if self.connection_type == "sftp":
+            return bool(self.sftp_host and self.sftp_username and self.sftp_remote_path)
+
         if not self.server_path:
             return False
         server_dir = Path(self.server_path)
@@ -134,21 +338,38 @@ class Config:
 
     def get_behavior_packs_path(self) -> Optional[Path]:
         """Get the behavior_packs directory path."""
+        if self.connection_type == "sftp":
+            return None
         if not self.is_server_configured():
             return None
         return Path(self.server_path) / "behavior_packs"
 
     def get_resource_packs_path(self) -> Optional[Path]:
         """Get the resource_packs directory path."""
+        if self.connection_type == "sftp":
+            return None
         if not self.is_server_configured():
             return None
         return Path(self.server_path) / "resource_packs"
 
     def get_worlds_path(self) -> Optional[Path]:
         """Get the worlds directory path."""
+        if self.connection_type == "sftp":
+            return None
         if not self.is_server_configured():
             return None
         return Path(self.server_path) / "worlds"
+
+    def get_server_display_path(self) -> str:
+        """Get a user-facing display value for the configured server location."""
+        if self.connection_type == "sftp":
+            if not self.is_server_configured():
+                return ""
+            return (
+                f"sftp://{self.sftp_username}@{self.sftp_host}:{self.sftp_port}"
+                f"{self.sftp_remote_path}"
+            )
+        return self.server_path
 
     @property
     def default_packs_detected(self) -> bool:

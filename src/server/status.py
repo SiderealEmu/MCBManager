@@ -30,14 +30,14 @@ class BedrockServerStatus:
 class ServerStatusQuery:
     """Queries Minecraft Bedrock server status using mcstatus."""
 
-    def __init__(self, host: str = "localhost", port: Optional[int] = None):
+    def __init__(self, host: Optional[str] = None, port: Optional[int] = None):
         """Initialize the status query.
 
         Args:
             host: Server hostname or IP address.
             port: Server port. If None, will try to read from server.properties.
         """
-        self.host = host
+        self.host = host or config.server_status_host
         self._port = port
         self._last_status: Optional[BedrockServerStatus] = None
 

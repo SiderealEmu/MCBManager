@@ -1,11 +1,10 @@
 """Addon management functionality."""
 
 import json
-from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import List, Optional, Set
 
-from ..config import config
-from .models import Addon, PackType
+from ..server import server_fs
+from .models import Addon, PackType, load_json_text_with_comments
 
 
 class AddonManager:
@@ -24,22 +23,39 @@ class AddonManager:
     def _scan_packs(self, pack_type: PackType) -> List[Addon]:
         """Scan a pack directory for installed addons."""
         packs = []
+        pack_dir = "behavior_packs" if pack_type == PackType.BEHAVIOR else "resource_packs"
 
-        if pack_type == PackType.BEHAVIOR:
-            pack_dir = config.get_behavior_packs_path()
-        else:
-            pack_dir = config.get_resource_packs_path()
-
-        if not pack_dir or not pack_dir.exists():
+        if not server_fs.exists(pack_dir) or not server_fs.is_dir(pack_dir):
             return packs
 
-        for item in pack_dir.iterdir():
-            if item.is_dir():
-                manifest_path = item / "manifest.json"
-                if manifest_path.exists():
-                    addon = Addon.from_manifest(manifest_path, pack_type)
-                    if addon:
-                        packs.append(addon)
+        for item in server_fs.list_dir(pack_dir):
+            if not item.is_dir:
+                continue
+
+            manifest_path = server_fs.join(item.path, "manifest.json")
+            if not server_fs.exists(manifest_path):
+                continue
+
+            try:
+                manifest_data = load_json_text_with_comments(server_fs.read_text(manifest_path))
+            except (json.JSONDecodeError, Exception):
+                continue
+
+            icon_path = None
+            for icon_name in ["pack_icon.png", "pack_icon.jpg"]:
+                candidate = server_fs.join(item.path, icon_name)
+                if server_fs.exists(candidate):
+                    icon_path = candidate
+                    break
+
+            addon = Addon.from_manifest_data(
+                manifest=manifest_data,
+                pack_type=pack_type,
+                pack_path=item.path,
+                icon_path=icon_path,
+            )
+            if addon:
+                packs.append(addon)
 
         return sorted(packs, key=lambda x: x.name.lower())
 
@@ -61,38 +77,39 @@ class AddonManager:
     def _get_enabled_pack_uuids(self, filename: str) -> Set[str]:
         """Get the set of enabled pack UUIDs from a world pack file."""
         uuids = set()
-        worlds_path = config.get_worlds_path()
 
-        if not worlds_path or not worlds_path.exists():
+        worlds_path = "worlds"
+        if not server_fs.exists(worlds_path) or not server_fs.is_dir(worlds_path):
             return uuids
 
-        # Check all worlds for enabled packs
-        for world_dir in worlds_path.iterdir():
-            if world_dir.is_dir():
-                pack_file = world_dir / filename
-                if pack_file.exists():
-                    try:
-                        with open(pack_file, "r", encoding="utf-8") as f:
-                            packs = json.load(f)
-                            for pack in packs:
-                                uuid = pack.get("pack_id", "")
-                                if uuid:
-                                    uuids.add(uuid)
-                    except (json.JSONDecodeError, IOError):
-                        pass
+        for world_dir in server_fs.list_dir(worlds_path):
+            if not world_dir.is_dir:
+                continue
+
+            pack_file = server_fs.join(world_dir.path, filename)
+            if not server_fs.exists(pack_file):
+                continue
+
+            try:
+                packs = server_fs.read_json(pack_file)
+                for pack in packs:
+                    uuid = pack.get("pack_id", "")
+                    if uuid:
+                        uuids.add(uuid)
+            except (json.JSONDecodeError, TypeError, Exception):
+                pass
 
         return uuids
 
     def get_worlds(self) -> List[str]:
         """Get list of available world names."""
         worlds = []
-        worlds_path = config.get_worlds_path()
 
-        if not worlds_path or not worlds_path.exists():
+        if not server_fs.exists("worlds") or not server_fs.is_dir("worlds"):
             return worlds
 
-        for world_dir in worlds_path.iterdir():
-            if world_dir.is_dir():
+        for world_dir in server_fs.list_dir("worlds"):
+            if world_dir.is_dir:
                 worlds.append(world_dir.name)
 
         return sorted(worlds)
@@ -125,75 +142,56 @@ class AddonManager:
 
     def _add_pack_to_world(self, addon: Addon, world_name: str, filename: str) -> bool:
         """Add a pack entry to a world's pack file."""
-        worlds_path = config.get_worlds_path()
-        if not worlds_path:
+        world_dir = server_fs.join("worlds", world_name)
+        if not server_fs.exists(world_dir) or not server_fs.is_dir(world_dir):
             return False
 
-        world_dir = worlds_path / world_name
-        if not world_dir.exists():
-            return False
+        pack_file = server_fs.join(world_dir, filename)
 
-        pack_file = world_dir / filename
-
-        # Load existing packs or create empty list
         packs = []
-        if pack_file.exists():
+        if server_fs.exists(pack_file):
             try:
-                with open(pack_file, "r", encoding="utf-8") as f:
-                    packs = json.load(f)
-            except (json.JSONDecodeError, IOError):
+                packs = server_fs.read_json(pack_file)
+            except (json.JSONDecodeError, OSError, TypeError):
                 packs = []
 
-        # Check if already enabled
         for pack in packs:
             if pack.get("pack_id") == addon.uuid:
-                return True  # Already enabled
+                return True
 
-        # Add the new pack
         packs.append(addon.to_pack_entry())
 
-        # Save the file
         try:
-            with open(pack_file, "w", encoding="utf-8") as f:
-                json.dump(packs, f, indent=2)
+            server_fs.write_json(pack_file, packs)
             addon.enabled = True
             return True
-        except IOError:
+        except Exception:
             return False
 
     def _remove_pack_from_world(
         self, addon: Addon, world_name: str, filename: str
     ) -> bool:
         """Remove a pack entry from a world's pack file."""
-        worlds_path = config.get_worlds_path()
-        if not worlds_path:
+        world_dir = server_fs.join("worlds", world_name)
+        if not server_fs.exists(world_dir) or not server_fs.is_dir(world_dir):
             return False
 
-        world_dir = worlds_path / world_name
-        if not world_dir.exists():
-            return False
-
-        pack_file = world_dir / filename
-
-        if not pack_file.exists():
-            return True  # No file means not enabled
+        pack_file = server_fs.join(world_dir, filename)
+        if not server_fs.exists(pack_file):
+            return True
 
         try:
-            with open(pack_file, "r", encoding="utf-8") as f:
-                packs = json.load(f)
-        except (json.JSONDecodeError, IOError):
+            packs = server_fs.read_json(pack_file)
+        except (json.JSONDecodeError, OSError, TypeError):
             return False
 
-        # Remove the pack
         packs = [p for p in packs if p.get("pack_id") != addon.uuid]
 
-        # Save the file
         try:
-            with open(pack_file, "w", encoding="utf-8") as f:
-                json.dump(packs, f, indent=2)
+            server_fs.write_json(pack_file, packs)
             addon.enabled = False
             return True
-        except IOError:
+        except Exception:
             return False
 
     def is_addon_enabled_in_world(self, addon: Addon, world_name: str) -> bool:
@@ -203,21 +201,16 @@ class AddonManager:
         else:
             filename = "world_resource_packs.json"
 
-        worlds_path = config.get_worlds_path()
-        if not worlds_path:
-            return False
-
-        pack_file = worlds_path / world_name / filename
-        if not pack_file.exists():
+        pack_file = server_fs.join("worlds", world_name, filename)
+        if not server_fs.exists(pack_file):
             return False
 
         try:
-            with open(pack_file, "r", encoding="utf-8") as f:
-                packs = json.load(f)
-                for pack in packs:
-                    if pack.get("pack_id") == addon.uuid:
-                        return True
-        except (json.JSONDecodeError, IOError):
+            packs = server_fs.read_json(pack_file)
+            for pack in packs:
+                if pack.get("pack_id") == addon.uuid:
+                    return True
+        except (json.JSONDecodeError, TypeError, Exception):
             pass
 
         return False
@@ -232,45 +225,36 @@ class AddonManager:
         else:
             filename = "world_resource_packs.json"
 
-        worlds_path = config.get_worlds_path()
-        if not worlds_path:
-            return None
-
-        pack_file = worlds_path / world_name / filename
-        if not pack_file.exists():
+        pack_file = server_fs.join("worlds", world_name, filename)
+        if not server_fs.exists(pack_file):
             return None
 
         try:
-            with open(pack_file, "r", encoding="utf-8") as f:
-                packs = json.load(f)
-                for i, pack in enumerate(packs):
-                    if pack.get("pack_id") == addon.uuid:
-                        return i
-        except (json.JSONDecodeError, IOError):
+            packs = server_fs.read_json(pack_file)
+            for i, pack in enumerate(packs):
+                if pack.get("pack_id") == addon.uuid:
+                    return i
+        except (json.JSONDecodeError, TypeError, Exception):
             pass
 
         return None
 
     def get_enabled_pack_count(self, world_name: str, pack_type: PackType) -> int:
         """Get the total count of enabled packs for a world."""
-        if pack_type == PackType.BEHAVIOR:
-            filename = "world_behavior_packs.json"
-        else:
-            filename = "world_resource_packs.json"
+        filename = (
+            "world_behavior_packs.json"
+            if pack_type == PackType.BEHAVIOR
+            else "world_resource_packs.json"
+        )
 
-        worlds_path = config.get_worlds_path()
-        if not worlds_path:
-            return 0
-
-        pack_file = worlds_path / world_name / filename
-        if not pack_file.exists():
+        pack_file = server_fs.join("worlds", world_name, filename)
+        if not server_fs.exists(pack_file):
             return 0
 
         try:
-            with open(pack_file, "r", encoding="utf-8") as f:
-                packs = json.load(f)
-                return len(packs)
-        except (json.JSONDecodeError, IOError):
+            packs = server_fs.read_json(pack_file)
+            return len(packs)
+        except (json.JSONDecodeError, TypeError, Exception):
             return 0
 
     def move_addon_priority(self, addon: Addon, world_name: str, direction: int) -> bool:
@@ -284,26 +268,21 @@ class AddonManager:
         Returns:
             True if move was successful, False otherwise
         """
-        if addon.pack_type == PackType.BEHAVIOR:
-            filename = "world_behavior_packs.json"
-        else:
-            filename = "world_resource_packs.json"
+        filename = (
+            "world_behavior_packs.json"
+            if addon.pack_type == PackType.BEHAVIOR
+            else "world_resource_packs.json"
+        )
 
-        worlds_path = config.get_worlds_path()
-        if not worlds_path:
-            return False
-
-        pack_file = worlds_path / world_name / filename
-        if not pack_file.exists():
+        pack_file = server_fs.join("worlds", world_name, filename)
+        if not server_fs.exists(pack_file):
             return False
 
         try:
-            with open(pack_file, "r", encoding="utf-8") as f:
-                packs = json.load(f)
-        except (json.JSONDecodeError, IOError):
+            packs = server_fs.read_json(pack_file)
+        except (json.JSONDecodeError, TypeError, Exception):
             return False
 
-        # Find current position
         current_index = None
         for i, pack in enumerate(packs):
             if pack.get("pack_id") == addon.uuid:
@@ -311,45 +290,29 @@ class AddonManager:
                 break
 
         if current_index is None:
-            return False  # Pack not found
+            return False
 
         new_index = current_index + direction
-
-        # Bounds check
         if new_index < 0 or new_index >= len(packs):
-            return False  # Can't move beyond bounds
+            return False
 
-        # Swap positions
         packs[current_index], packs[new_index] = packs[new_index], packs[current_index]
 
-        # Save the file
         try:
-            with open(pack_file, "w", encoding="utf-8") as f:
-                json.dump(packs, f, indent=2)
+            server_fs.write_json(pack_file, packs)
             return True
-        except IOError:
+        except Exception:
             return False
 
     def delete_addon(self, addon: Addon) -> bool:
         """Delete an addon from the server."""
-        import shutil
-
-        if not addon.path.exists():
+        success = server_fs.delete_tree(addon.path)
+        if not success:
             return False
 
-        try:
-            shutil.rmtree(addon.path)
+        if addon.pack_type == PackType.BEHAVIOR:
+            self._behavior_packs = [p for p in self._behavior_packs if p.uuid != addon.uuid]
+        else:
+            self._resource_packs = [p for p in self._resource_packs if p.uuid != addon.uuid]
 
-            # Remove from internal lists
-            if addon.pack_type == PackType.BEHAVIOR:
-                self._behavior_packs = [
-                    p for p in self._behavior_packs if p.uuid != addon.uuid
-                ]
-            else:
-                self._resource_packs = [
-                    p for p in self._resource_packs if p.uuid != addon.uuid
-                ]
-
-            return True
-        except (IOError, OSError):
-            return False
+        return True

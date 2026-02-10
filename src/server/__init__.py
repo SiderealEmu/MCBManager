@@ -1,3 +1,4 @@
+from .filesystem import ServerDirEntry, ServerFilesystem, server_fs
 from .monitor import ServerMonitor
 from .properties import ServerProperties
 from .status import (
@@ -8,6 +9,9 @@ from .status import (
 )
 
 __all__ = [
+    "ServerDirEntry",
+    "ServerFilesystem",
+    "server_fs",
     "ServerMonitor",
     "ServerProperties",
     "BedrockServerStatus",

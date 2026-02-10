@@ -21,10 +21,26 @@ class ImportDialog(ctk.CTkToplevel):
         self.imported = False
         self.selected_path: Optional[str] = None
         self.imported_packs = []  # List of (folder_name, PackType) tuples
+        self._pending_report_lines = []
+        self._report_lock = threading.Lock()
+        self._last_progress_message = ""
+        self._step_progress_info = None
 
         self.title("Import Addon")
-        self.geometry("550x350")
-        self.resizable(False, False)
+        self.update_idletasks()
+        screen_w = self.winfo_screenwidth()
+        screen_h = self.winfo_screenheight()
+        default_w = 760
+        default_h = 680
+        min_w = 680
+        min_h = 560
+
+        width = min(default_w, max(min_w, screen_w - 80))
+        height = min(default_h, max(min_h, screen_h - 80))
+
+        self.geometry(f"{width}x{height}")
+        self.minsize(min_w, min_h)
+        self.resizable(True, True)
 
         # Set window icon
         self._set_icon()
@@ -33,10 +49,10 @@ class ImportDialog(ctk.CTkToplevel):
         self.transient(parent)
         self.grab_set()
 
-        # Center on parent
+        # Center on screen so the full dialog stays visible regardless of parent position
         self.update_idletasks()
-        x = parent.winfo_x() + (parent.winfo_width() - 550) // 2
-        y = parent.winfo_y() + (parent.winfo_height() - 350) // 2
+        x = max(0, (screen_w - width) // 2)
+        y = max(0, (screen_h - height) // 2)
         self.geometry(f"+{x}+{y}")
 
         self._create_widgets()
@@ -154,6 +170,47 @@ class ImportDialog(ctk.CTkToplevel):
         )
         self.progress_percent.pack(side="right")
 
+        # Step progress section for compression/upload operations
+        self.step_progress_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self.step_progress_frame.pack(fill="x", padx=30, pady=(8, 0))
+
+        self.step_progress_label = ctk.CTkLabel(
+            self.step_progress_frame,
+            text="Step progress: Waiting for transfer steps...",
+            font=ctk.CTkFont(size=11),
+            text_color="gray",
+            anchor="w",
+        )
+        self.step_progress_label.pack(anchor="w", pady=(0, 4))
+
+        step_bar_row = ctk.CTkFrame(self.step_progress_frame, fg_color="transparent")
+        step_bar_row.pack(fill="x")
+
+        self.step_progress_bar = ctk.CTkProgressBar(step_bar_row)
+        self.step_progress_bar.pack(side="left", fill="x", expand=True, padx=(0, 10))
+        self.step_progress_bar.set(0)
+
+        self.step_progress_percent = ctk.CTkLabel(
+            step_bar_row,
+            text="0%",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            width=45,
+        )
+        self.step_progress_percent.pack(side="right")
+
+        # Detailed report section
+        report_label = ctk.CTkLabel(
+            self,
+            text="Import Report",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            anchor="w",
+        )
+        report_label.pack(fill="x", padx=30, pady=(10, 2))
+
+        self.report_text = ctk.CTkTextbox(self, height=180, wrap="word")
+        self.report_text.pack(fill="both", expand=True, padx=30, pady=(0, 5))
+        self.report_text.configure(state="disabled")
+
         # Bottom buttons
         bottom_frame = ctk.CTkFrame(self, fg_color="transparent")
         bottom_frame.pack(fill="x", padx=30, pady=(10, 20), side="bottom")
@@ -245,13 +302,14 @@ class ImportDialog(ctk.CTkToplevel):
             return
 
         path = Path(self.selected_path)
+        self._reset_report()
 
         # Show progress section (insert before status label)
         self.progress_frame.pack(
             fill="x", padx=30, pady=(10, 0), before=self.status_label
         )
         self.progress_bar.set(0)
-        self.progress_label.configure(text="Starting import...")
+        self.progress_label.configure(text="Step 0/1: Starting import...")
         self.status_label.configure(text="")
         self.import_btn.configure(state="disabled")
         self.cancel_btn.configure(state="disabled")
@@ -262,6 +320,15 @@ class ImportDialog(ctk.CTkToplevel):
         self._progress_step = 0
         self._progress_total = 1
         self._progress_message = "Starting..."
+        self._last_progress_message = ""
+        self._step_progress_info = None
+        self.step_progress_bar.set(0)
+        self.step_progress_percent.configure(text="0%")
+        self.step_progress_label.configure(
+            text="Step progress: Waiting for transfer steps...",
+            text_color="gray",
+        )
+        self._append_report_line(f"Starting import: {path}")
 
         # Run import in background thread to keep UI responsive
         self._import_thread = threading.Thread(
@@ -274,11 +341,21 @@ class ImportDialog(ctk.CTkToplevel):
         # Start checking for completion and updating progress
         self._update_progress_display()
 
-    def _progress_callback(self, step: int, total: int, message: str) -> None:
+    def _progress_callback(
+        self, step: int, total: int, message: str, step_info: Optional[dict] = None
+    ) -> None:
         """Callback for import progress updates (called from background thread)."""
         self._progress_step = step
         self._progress_total = total
         self._progress_message = message
+        if step_info:
+            step_name = str(step_info.get("step_name", "")).strip().lower()
+            if step_name in {"compression", "upload"}:
+                self._step_progress_info = step_info
+        if message != self._last_progress_message:
+            with self._report_lock:
+                self._pending_report_lines.append(message)
+            self._last_progress_message = message
 
     def _run_import_thread(self, path: Path) -> None:
         """Run the import operation in a background thread."""
@@ -294,13 +371,31 @@ class ImportDialog(ctk.CTkToplevel):
 
     def _update_progress_display(self) -> None:
         """Update the progress bar and label from the main thread."""
+        self._flush_pending_report_lines()
+
         # Update progress bar, percentage, and label
         if self._progress_total > 0:
             progress = self._progress_step / self._progress_total
             self.progress_bar.set(progress)
             percent = int(progress * 100)
             self.progress_percent.configure(text=f"{percent}%")
-        self.progress_label.configure(text=self._progress_message)
+        step_display = min(self._progress_step, self._progress_total)
+        self.progress_label.configure(
+            text=f"Step {step_display}/{self._progress_total}: {self._progress_message}"
+        )
+
+        # Update dedicated step-progress bar (compression/upload only)
+        if self._step_progress_info:
+            current = int(self._step_progress_info.get("current", 0))
+            total = max(int(self._step_progress_info.get("total", 1)), 1)
+            label = str(self._step_progress_info.get("label", "Step progress"))
+            value = max(0.0, min(1.0, current / total))
+            self.step_progress_bar.set(value)
+            self.step_progress_percent.configure(text=f"{int(value * 100)}%")
+            self.step_progress_label.configure(
+                text=f"Step progress ({label}): {current}/{total}",
+                text_color="gray",
+            )
 
         if self._import_thread.is_alive():
             # Still running, check again in 50ms
@@ -312,11 +407,20 @@ class ImportDialog(ctk.CTkToplevel):
     def _handle_import_result(self) -> None:
         """Handle the import result on the main thread."""
         result = self._import_result
+        self._flush_pending_report_lines()
+        if result.details:
+            self._append_report_lines(result.details)
 
         if result.success:
             self.progress_bar.set(1)  # Show complete
             self.progress_percent.configure(text="100%")
             self.progress_label.configure(text="Complete!")
+            self.step_progress_bar.set(1)
+            self.step_progress_percent.configure(text="100%")
+            self.step_progress_label.configure(
+                text="Step progress: Complete",
+                text_color="#00C853",
+            )
             self.status_label.configure(
                 text="Import successful!",
                 text_color="#00C853",  # Green
@@ -332,14 +436,24 @@ class ImportDialog(ctk.CTkToplevel):
                     f"Import successful, but there are compatibility concerns:\n\n{warning_text}",
                 )
 
-            # Show success message with details
+            self.status_label.configure(
+                text="Import complete. Review the report below.",
+                text_color="#00C853",
+            )
+            self.cancel_btn.configure(text="Close", state="normal")
+            self.import_btn.configure(state="normal")
+            self.file_btn.configure(state="normal")
+            self.folder_btn.configure(state="normal")
             messagebox.showinfo("Import Successful", result.message)
-
-            self.destroy()
         else:
             self.progress_bar.set(0)  # Reset
             self.progress_percent.configure(text="0%")
-            self.progress_frame.pack_forget()  # Hide progress section
+            self.step_progress_bar.set(0)
+            self.step_progress_percent.configure(text="0%")
+            self.step_progress_label.configure(
+                text="Step progress: Stopped",
+                text_color="#FF5252",
+            )
             self.status_label.configure(
                 text=f"Import failed: {result.message}",
                 text_color="#FF5252",  # Red
@@ -350,3 +464,34 @@ class ImportDialog(ctk.CTkToplevel):
             self.folder_btn.configure(state="normal")
 
             messagebox.showerror("Import Failed", result.message)
+
+    def _append_report_line(self, line: str) -> None:
+        """Append a single line to the report textbox."""
+        text = (line or "").strip()
+        if not text:
+            return
+        self.report_text.configure(state="normal")
+        self.report_text.insert("end", text + "\n")
+        self.report_text.see("end")
+        self.report_text.configure(state="disabled")
+
+    def _append_report_lines(self, lines) -> None:
+        """Append multiple lines to the report textbox."""
+        for line in lines:
+            self._append_report_line(line)
+
+    def _flush_pending_report_lines(self) -> None:
+        """Move queued report lines from worker thread into the UI."""
+        with self._report_lock:
+            pending = self._pending_report_lines[:]
+            self._pending_report_lines.clear()
+        if pending:
+            self._append_report_lines(pending)
+
+    def _reset_report(self) -> None:
+        """Clear the report textbox and queued lines."""
+        with self._report_lock:
+            self._pending_report_lines.clear()
+        self.report_text.configure(state="normal")
+        self.report_text.delete("1.0", "end")
+        self.report_text.configure(state="disabled")

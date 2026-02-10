@@ -104,7 +104,7 @@ class ServerPanel(ctk.CTkFrame):
 
         # Configure button
         self.configure_btn = ctk.CTkButton(
-            self, text="Configure Server Path", command=self._on_configure_click
+            self, text="Configure Server Connection", command=self._on_configure_click
         )
         self.configure_btn.pack(pady=10, padx=15, fill="x")
 
@@ -117,7 +117,7 @@ class ServerPanel(ctk.CTkFrame):
         # Server path display
         path_label = ctk.CTkLabel(
             self,
-            text="Server Path:",
+            text="Server Location:",
             font=ctk.CTkFont(size=11, weight="bold"),
             text_color="gray",
         )
@@ -186,8 +186,8 @@ class ServerPanel(ctk.CTkFrame):
                     self.info_items[key].configure(text="-")
 
         # Update path display
-        if config.server_path:
-            display_path = config.server_path
+        display_path = config.get_server_display_path()
+        if display_path:
             if len(display_path) > 40:
                 display_path = "..." + display_path[-37:]
             self.path_display.configure(text=display_path)
