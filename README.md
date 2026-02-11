@@ -18,7 +18,7 @@ MCBManager does its best with detecting and importing addons. However, not all a
 - Search and filter installed addons
 - Addon Dependency Detection
 - Addon/server Version compatibility checking
-- Local and SFTP server file management (Windows, macOS, Linux)
+- Local and SFTP server file management
 
 ### Future Plans
 
