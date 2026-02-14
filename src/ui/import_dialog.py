@@ -138,6 +138,17 @@ class ImportDialog(ctk.CTkToplevel):
         )
         formats_label.pack(pady=(15, 5))
 
+        self.install_to_development_var = ctk.BooleanVar(value=False)
+        self.install_to_development_checkbox = ctk.CTkCheckBox(
+            self,
+            text=(
+                "Install to development directories "
+                "(development_behavior_packs / development_resource_packs)"
+            ),
+            variable=self.install_to_development_var,
+        )
+        self.install_to_development_checkbox.pack(pady=(0, 6))
+
         # Status label for errors/success (placed before progress so we can insert progress before it)
         self.status_label = ctk.CTkLabel(self, text="", font=ctk.CTkFont(size=12))
         self.status_label.pack(pady=5)
@@ -302,6 +313,7 @@ class ImportDialog(ctk.CTkToplevel):
             return
 
         path = Path(self.selected_path)
+        install_to_development = bool(self.install_to_development_var.get())
         self._reset_report()
 
         # Show progress section (insert before status label)
@@ -315,6 +327,7 @@ class ImportDialog(ctk.CTkToplevel):
         self.cancel_btn.configure(state="disabled")
         self.file_btn.configure(state="disabled")
         self.folder_btn.configure(state="disabled")
+        self.install_to_development_checkbox.configure(state="disabled")
 
         # Initialize progress tracking
         self._progress_step = 0
@@ -329,11 +342,16 @@ class ImportDialog(ctk.CTkToplevel):
             text_color="gray",
         )
         self._append_report_line(f"Starting import: {path}")
+        self._append_report_line(
+            "Install target: development directories"
+            if install_to_development
+            else "Install target: default pack directories"
+        )
 
         # Run import in background thread to keep UI responsive
         self._import_thread = threading.Thread(
             target=self._run_import_thread,
-            args=(path,),
+            args=(path, install_to_development),
             daemon=True,
         )
         self._import_thread.start()
@@ -357,16 +375,20 @@ class ImportDialog(ctk.CTkToplevel):
                 self._pending_report_lines.append(message)
             self._last_progress_message = message
 
-    def _run_import_thread(self, path: Path) -> None:
+    def _run_import_thread(self, path: Path, install_to_development: bool) -> None:
         """Run the import operation in a background thread."""
         # Perform import with progress callback
         if path.is_dir():
             self._import_result = AddonImporter.import_folder(
-                path, progress_callback=self._progress_callback
+                path,
+                progress_callback=self._progress_callback,
+                install_to_development=install_to_development,
             )
         else:
             self._import_result = AddonImporter.import_addon(
-                path, progress_callback=self._progress_callback
+                path,
+                progress_callback=self._progress_callback,
+                install_to_development=install_to_development,
             )
 
     def _update_progress_display(self) -> None:
@@ -444,6 +466,7 @@ class ImportDialog(ctk.CTkToplevel):
             self.import_btn.configure(state="normal")
             self.file_btn.configure(state="normal")
             self.folder_btn.configure(state="normal")
+            self.install_to_development_checkbox.configure(state="normal")
             messagebox.showinfo("Import Successful", result.message)
         else:
             self.progress_bar.set(0)  # Reset
@@ -462,6 +485,7 @@ class ImportDialog(ctk.CTkToplevel):
             self.cancel_btn.configure(state="normal")
             self.file_btn.configure(state="normal")
             self.folder_btn.configure(state="normal")
+            self.install_to_development_checkbox.configure(state="normal")
 
             messagebox.showerror("Import Failed", result.message)
 

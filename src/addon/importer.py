@@ -113,13 +113,17 @@ class AddonImporter:
 
     @classmethod
     def import_addon(
-        cls, file_path: Path, progress_callback: Optional[ProgressCallback] = None
+        cls,
+        file_path: Path,
+        progress_callback: Optional[ProgressCallback] = None,
+        install_to_development: bool = False,
     ) -> ImportResult:
         """Import an addon from a file.
 
         Args:
             file_path: Path to the addon file
             progress_callback: Optional callback for progress updates (step, total, message)
+            install_to_development: Install into development_*_packs when True.
         """
         file_path = Path(file_path)
 
@@ -172,6 +176,11 @@ class AddonImporter:
         update_progress("Preparing import...", advance=False)
         add_detail(f"Input file: {file_path.name}")
         add_detail(f"File extension: {file_path.suffix.lower()}")
+        add_detail(
+            "Install target: development directories"
+            if install_to_development
+            else "Install target: default pack directories"
+        )
         update_progress("Validating file...")
 
         if not file_path.exists():
@@ -266,6 +275,7 @@ class AddonImporter:
                     pack_path,
                     pack_type,
                     base_name,
+                    install_to_development=install_to_development,
                     detail_callback=emit_transfer_line,
                     transfer_progress_callback=emit_step_progress,
                 )
@@ -492,6 +502,7 @@ class AddonImporter:
         pack_path: Path,
         pack_type: PackType,
         base_name: str = None,
+        install_to_development: bool = False,
         detail_callback: Optional[Callable[[str], None]] = None,
         transfer_progress_callback: Optional[
             Callable[[str, int, int, str], None]
@@ -507,9 +518,17 @@ class AddonImporter:
             - transfer_log: Details about copy/compression/upload/extraction steps
         """
         if pack_type == PackType.BEHAVIOR:
-            dest_base = "behavior_packs"
+            dest_base = (
+                "development_behavior_packs"
+                if install_to_development
+                else "behavior_packs"
+            )
         elif pack_type == PackType.RESOURCE:
-            dest_base = "resource_packs"
+            dest_base = (
+                "development_resource_packs"
+                if install_to_development
+                else "resource_packs"
+            )
         else:
             return False, "Unknown pack type", None, []
 
@@ -708,7 +727,10 @@ class AddonImporter:
 
     @classmethod
     def import_folder(
-        cls, folder_path: Path, progress_callback: Optional[ProgressCallback] = None
+        cls,
+        folder_path: Path,
+        progress_callback: Optional[ProgressCallback] = None,
+        install_to_development: bool = False,
     ) -> ImportResult:
         """Import addons from a folder.
 
@@ -719,6 +741,7 @@ class AddonImporter:
         Args:
             folder_path: Path to the addon folder
             progress_callback: Optional callback for progress updates (step, total, message)
+            install_to_development: Install into development_*_packs when True.
         """
         folder_path = Path(folder_path)
 
@@ -770,6 +793,11 @@ class AddonImporter:
 
         update_progress("Preparing folder import...", advance=False)
         add_detail(f"Input folder: {folder_path}")
+        add_detail(
+            "Install target: development directories"
+            if install_to_development
+            else "Install target: default pack directories"
+        )
         update_progress("Validating folder...")
 
         if not folder_path.exists() or not folder_path.is_dir():
@@ -820,6 +848,7 @@ class AddonImporter:
                     progress_callback=lambda _step, _total, message, _step_info, name=addon_file.name: update_progress(
                         f"{name}: {message}", advance=False
                     ),
+                    install_to_development=install_to_development,
                 )
                 details.append(f"Archive report for {addon_file.name}:")
                 details.extend([f"  {line}" for line in result.details])
@@ -847,6 +876,7 @@ class AddonImporter:
                     pack_path,
                     pack_type,
                     base_name,
+                    install_to_development=install_to_development,
                     detail_callback=emit_transfer_line,
                     transfer_progress_callback=emit_step_progress,
                 )

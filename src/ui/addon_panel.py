@@ -50,14 +50,16 @@ class AddonPanel(ctk.CTkFrame):
         self.show_default_packs: bool = False
         self._behavior_packs: List[Addon] = []
         self._resource_packs: List[Addon] = []
+        self._development_behavior_packs: List[Addon] = []
+        self._development_resource_packs: List[Addon] = []
         self._search_debounce_id: Optional[str] = None
+        self._dev_behavior_tab_name = "Development Behavior Packs"
+        self._dev_resource_tab_name = "Development Resource Packs"
 
         # Collapse state for sections (per tab)
-        self._behavior_beta_api_collapsed: bool = False
         self._behavior_missing_deps_collapsed: bool = False
         self._behavior_enabled_collapsed: bool = False
         self._behavior_disabled_collapsed: bool = False
-        self._resource_beta_api_collapsed: bool = False
         self._resource_missing_deps_collapsed: bool = False
         self._resource_enabled_collapsed: bool = False
         self._resource_disabled_collapsed: bool = False
@@ -69,6 +71,11 @@ class AddonPanel(ctk.CTkFrame):
         self._delete_state_by_uuid: Dict[str, str] = {}
         self._delete_queue_lock = threading.Lock()
         self._delete_worker_thread: Optional[threading.Thread] = None
+        self.development_behavior_tab: Optional[ctk.CTkFrame] = None
+        self.development_behavior_scroll: Optional[ctk.CTkScrollableFrame] = None
+        self.development_resource_tab: Optional[ctk.CTkFrame] = None
+        self.development_resource_scroll: Optional[ctk.CTkScrollableFrame] = None
+        self._dev_normal_conflict_keys: set = set()
 
         self._create_widgets()
 
@@ -357,6 +364,8 @@ class AddonPanel(ctk.CTkFrame):
         # Empty state messages
         self.behavior_empty_msg = "No behavior packs installed"
         self.resource_empty_msg = "No resource packs installed"
+        self.development_behavior_empty_msg = "No development behavior packs installed"
+        self.development_resource_empty_msg = "No development resource packs installed"
 
     def refresh(self) -> None:
         """Refresh the addon lists."""
@@ -375,9 +384,67 @@ class AddonPanel(ctk.CTkFrame):
         # Store all packs
         self._behavior_packs = self.addon_manager.get_behavior_packs()
         self._resource_packs = self.addon_manager.get_resource_packs()
+        self._development_behavior_packs = (
+            self.addon_manager.get_development_behavior_packs()
+        )
+        self._development_resource_packs = (
+            self.addon_manager.get_development_resource_packs()
+        )
+        self._sync_development_tabs()
 
         # Update pack lists with filtering
         self._update_filtered_lists()
+
+    def _create_development_tab(self, tab_name: str) -> Tuple[ctk.CTkFrame, ctk.CTkScrollableFrame]:
+        """Create a development tab frame with a scrollable addon list."""
+        tab = self.tabview.add(tab_name)
+        tab.grid_columnconfigure(0, weight=1)
+        tab.grid_rowconfigure(0, weight=1)
+
+        scroll = ctk.CTkScrollableFrame(tab)
+        scroll.grid(row=0, column=0, sticky="nsew")
+        scroll.grid_columnconfigure(0, weight=1)
+        return tab, scroll
+
+    def _sync_development_tabs(self) -> None:
+        """Show development tabs only when their directories contain addons."""
+        selected_tab = None
+        try:
+            selected_tab = self.tabview.get()
+        except Exception:
+            selected_tab = None
+
+        if self._development_behavior_packs:
+            if self.development_behavior_tab is None:
+                (
+                    self.development_behavior_tab,
+                    self.development_behavior_scroll,
+                ) = self._create_development_tab(self._dev_behavior_tab_name)
+        elif self.development_behavior_tab is not None:
+            if selected_tab == self._dev_behavior_tab_name:
+                try:
+                    self.tabview.set("Behavior Packs")
+                except Exception:
+                    pass
+            self.tabview.delete(self._dev_behavior_tab_name)
+            self.development_behavior_tab = None
+            self.development_behavior_scroll = None
+
+        if self._development_resource_packs:
+            if self.development_resource_tab is None:
+                (
+                    self.development_resource_tab,
+                    self.development_resource_scroll,
+                ) = self._create_development_tab(self._dev_resource_tab_name)
+        elif self.development_resource_tab is not None:
+            if selected_tab == self._dev_resource_tab_name:
+                try:
+                    self.tabview.set("Resource Packs")
+                except Exception:
+                    pass
+            self.tabview.delete(self._dev_resource_tab_name)
+            self.development_resource_tab = None
+            self.development_resource_scroll = None
 
     def _filter_packs(self, packs: List[Addon]) -> List[Addon]:
         """Filter packs based on search query and default pack visibility."""
@@ -401,8 +468,15 @@ class AddonPanel(ctk.CTkFrame):
 
     def _update_filtered_lists(self) -> None:
         """Update pack lists with current search filter."""
+        self._dev_normal_conflict_keys = self._compute_dev_normal_conflict_keys()
+
         # Update installed UUIDs cache
-        all_addons = self._behavior_packs + self._resource_packs
+        all_addons = (
+            self._behavior_packs
+            + self._resource_packs
+            + self._development_behavior_packs
+            + self._development_resource_packs
+        )
         self._installed_uuids = {addon.uuid for addon in all_addons}
         self._addon_cards_by_uuid = {}
         behavior_positions, resource_positions = (
@@ -411,6 +485,12 @@ class AddonPanel(ctk.CTkFrame):
 
         filtered_behavior = self._filter_packs(self._behavior_packs)
         filtered_resource = self._filter_packs(self._resource_packs)
+        filtered_development_behavior = self._filter_packs(
+            self._development_behavior_packs
+        )
+        filtered_development_resource = self._filter_packs(
+            self._development_resource_packs
+        )
 
         self._update_pack_list(
             self.behavior_scroll,
@@ -426,6 +506,66 @@ class AddonPanel(ctk.CTkFrame):
             PackType.RESOURCE,
             world_pack_positions=resource_positions,
         )
+        if self.development_behavior_scroll is not None:
+            self._update_pack_list(
+                self.development_behavior_scroll,
+                self.development_behavior_empty_msg,
+                filtered_development_behavior,
+                PackType.BEHAVIOR,
+                world_pack_positions=behavior_positions,
+            )
+        if self.development_resource_scroll is not None:
+            self._update_pack_list(
+                self.development_resource_scroll,
+                self.development_resource_empty_msg,
+                filtered_development_resource,
+                PackType.RESOURCE,
+                world_pack_positions=resource_positions,
+            )
+
+    @staticmethod
+    def _addon_conflict_key(addon: Addon) -> str:
+        """Return conflict key used for dev-vs-normal duplicate detection."""
+        return f"{addon.pack_type.value}:{addon.uuid}"
+
+    def _compute_dev_normal_conflict_keys(self) -> set:
+        """Detect addons installed in both normal and development directories."""
+        normal = {
+            self._addon_conflict_key(addon)
+            for addon in (self._behavior_packs + self._resource_packs)
+            if addon.uuid
+        }
+        development = {
+            self._addon_conflict_key(addon)
+            for addon in (
+                self._development_behavior_packs + self._development_resource_packs
+            )
+            if addon.uuid
+        }
+        return normal.intersection(development)
+
+    def _find_duplicate_counterpart(self, addon: Addon) -> Optional[Addon]:
+        """Find the opposite-location duplicate for an addon, if present."""
+        if not addon.uuid:
+            return None
+
+        if addon.pack_type == PackType.BEHAVIOR:
+            opposite_list = (
+                self._behavior_packs
+                if addon.is_development
+                else self._development_behavior_packs
+            )
+        else:
+            opposite_list = (
+                self._resource_packs
+                if addon.is_development
+                else self._development_resource_packs
+            )
+
+        for candidate in opposite_list:
+            if candidate.uuid == addon.uuid:
+                return candidate
+        return None
 
     def _get_selected_world_pack_positions(
         self,
@@ -500,6 +640,7 @@ class AddonPanel(ctk.CTkFrame):
         packs: List[Addon],
         pack_type: PackType,
         world_pack_positions: Optional[Dict[str, int]] = None,
+        server_wide: bool = False,
     ) -> None:
         """Update a pack list frame."""
         # Temporarily disable scrolling updates for smoother rebuilding
@@ -514,7 +655,10 @@ class AddonPanel(ctk.CTkFrame):
             if self.search_query:
                 message = "No addons match your search"
             elif not self.show_default_packs and (
-                self._behavior_packs or self._resource_packs
+                self._behavior_packs
+                or self._resource_packs
+                or self._development_behavior_packs
+                or self._development_resource_packs
             ):
                 message = "No custom addons installed (default packs hidden)"
             else:
@@ -524,43 +668,45 @@ class AddonPanel(ctk.CTkFrame):
             empty_label.pack(pady=50)
             return
 
-        # Separate packs into categories: beta API deps, missing deps, enabled, disabled
+        # Separate packs into categories: missing deps, enabled, disabled.
         world_pack_positions = world_pack_positions or {}
 
-        beta_api_packs = []
         missing_deps_packs = []
         enabled_packs = []
         disabled_packs = []
 
         for pack in packs:
-            position = world_pack_positions.get(pack.uuid)
-            is_enabled = position is not None
+            position = None if server_wide else world_pack_positions.get(pack.uuid)
+            is_enabled = True if server_wide else position is not None
 
-            has_beta_api_deps = pack.has_minecraft_beta_dependencies()
             if pack.has_missing_dependencies(self._installed_uuids):
                 missing_deps_packs.append((pack, is_enabled))
-            elif has_beta_api_deps:
-                beta_api_packs.append((pack, is_enabled))
             elif is_enabled:
                 enabled_packs.append((pack, position))
             else:
                 disabled_packs.append(pack)
 
-        # Sort enabled packs by position (load order)
-        enabled_packs.sort(key=lambda x: x[1])
-        total_beta_api = len(beta_api_packs)
+        if server_wide:
+            enabled_packs.sort(key=lambda x: x[0].name.lower())
+        else:
+            # Sort enabled packs by position (load order)
+            enabled_packs.sort(key=lambda x: x[1])
+        total_beta_api = sum(
+            1 for pack in packs if pack.has_minecraft_beta_dependencies()
+        )
         total_missing_deps = len(missing_deps_packs)
-        total_enabled = len(enabled_packs)
-        total_disabled = len(disabled_packs)
+        total_enabled = len(packs) if server_wide else len(enabled_packs)
+        global_enabled_count = (
+            len(world_pack_positions) if not server_wide else total_enabled
+        )
+        total_disabled = 0 if server_wide else len(disabled_packs)
 
         # Get collapse states for this pack type
         if pack_type == PackType.BEHAVIOR:
-            beta_api_collapsed = self._behavior_beta_api_collapsed
             missing_deps_collapsed = self._behavior_missing_deps_collapsed
             enabled_collapsed = self._behavior_enabled_collapsed
             disabled_collapsed = self._behavior_disabled_collapsed
         else:
-            beta_api_collapsed = self._resource_beta_api_collapsed
             missing_deps_collapsed = self._resource_missing_deps_collapsed
             enabled_collapsed = self._resource_enabled_collapsed
             disabled_collapsed = self._resource_disabled_collapsed
@@ -576,6 +722,8 @@ class AddonPanel(ctk.CTkFrame):
             f"Enabled: {total_enabled}",
             f"Disabled: {total_disabled}",
         ]
+        if server_wide:
+            summary_parts.append("Scope: Server-wide")
         if total_beta_api > 0:
             summary_parts.append(f"Minecraft Beta API: {total_beta_api}")
         if total_missing_deps > 0:
@@ -589,35 +737,6 @@ class AddonPanel(ctk.CTkFrame):
         )
         summary_label.pack(side="left")
         row += 1
-
-        # Section for packs requiring Minecraft Beta API
-        if beta_api_packs:
-            beta_header = self._create_collapsible_header(
-                scroll_frame,
-                f"Minecraft Beta API ({total_beta_api})",
-                beta_api_collapsed,
-                lambda: self._toggle_section(pack_type, "beta_api"),
-                header_color="#FF9800",
-            )
-            beta_header.grid(row=row, column=0, sticky="ew", pady=(5, 5), padx=5)
-            row += 1
-
-            if not beta_api_collapsed:
-                for pack, is_enabled in sorted(beta_api_packs, key=lambda x: x[0].name.lower()):
-                    card = AddonCard(
-                        scroll_frame,
-                        pack,
-                        self.selected_world,
-                        self.addon_manager,
-                        on_toggle=self._on_addon_toggle,
-                        on_delete=self._on_addon_delete,
-                        installed_uuids=self._installed_uuids,
-                        deletion_state=self._get_delete_state(pack.uuid),
-                        is_enabled=is_enabled,
-                    )
-                    self._register_addon_card(card)
-                    card.grid(row=row, column=0, sticky="ew", pady=5, padx=5)
-                    row += 1
 
         # Section for packs with missing dependencies (at top, highlighted)
         if missing_deps_packs:
@@ -642,9 +761,15 @@ class AddonPanel(ctk.CTkFrame):
                         self.addon_manager,
                         on_toggle=self._on_addon_toggle,
                         on_delete=self._on_addon_delete,
+                        on_delete_duplicate=self._on_delete_duplicate,
                         installed_uuids=self._installed_uuids,
                         deletion_state=self._get_delete_state(pack.uuid),
                         is_enabled=is_enabled,
+                        is_server_wide=server_wide,
+                        has_location_conflict=(
+                            self._addon_conflict_key(pack)
+                            in self._dev_normal_conflict_keys
+                        ),
                     )
                     self._register_addon_card(card)
                     card.grid(row=row, column=0, sticky="ew", pady=5, padx=5)
@@ -652,9 +777,14 @@ class AddonPanel(ctk.CTkFrame):
 
         # Create section header for enabled packs if any exist
         if enabled_packs:
+            enabled_title = (
+                f"Enabled ({total_enabled}) - Server Wide"
+                if server_wide
+                else f"Enabled ({total_enabled}) - Load Order"
+            )
             enabled_header = self._create_collapsible_header(
                 scroll_frame,
-                f"Enabled ({total_enabled}) - Load Order",
+                enabled_title,
                 enabled_collapsed,
                 lambda: self._toggle_section(pack_type, "enabled"),
             )
@@ -662,7 +792,7 @@ class AddonPanel(ctk.CTkFrame):
                 row=row,
                 column=0,
                 sticky="ew",
-                pady=(15 if (missing_deps_packs or beta_api_packs) else 5, 5),
+                pady=(15 if missing_deps_packs else 5, 5),
                 padx=5,
             )
             row += 1
@@ -676,20 +806,26 @@ class AddonPanel(ctk.CTkFrame):
                         self.addon_manager,
                         on_toggle=self._on_addon_toggle,
                         on_delete=self._on_addon_delete,
-                        on_move_up=self._on_move_up,
-                        on_move_down=self._on_move_down,
-                        position=position,
-                        total_enabled=total_enabled,
+                        on_delete_duplicate=self._on_delete_duplicate,
+                        on_move_up=None if server_wide else self._on_move_up,
+                        on_move_down=None if server_wide else self._on_move_down,
+                        position=None if server_wide else position,
+                        total_enabled=global_enabled_count,
                         installed_uuids=self._installed_uuids,
                         deletion_state=self._get_delete_state(pack.uuid),
                         is_enabled=True,
+                        is_server_wide=server_wide,
+                        has_location_conflict=(
+                            self._addon_conflict_key(pack)
+                            in self._dev_normal_conflict_keys
+                        ),
                     )
                     self._register_addon_card(card)
                     card.grid(row=row, column=0, sticky="ew", pady=5, padx=5)
                     row += 1
 
         # Section for disabled packs
-        if disabled_packs:
+        if disabled_packs and not server_wide:
             disabled_header = self._create_collapsible_header(
                 scroll_frame,
                 f"Disabled ({total_disabled})",
@@ -708,9 +844,15 @@ class AddonPanel(ctk.CTkFrame):
                         self.addon_manager,
                         on_toggle=self._on_addon_toggle,
                         on_delete=self._on_addon_delete,
+                        on_delete_duplicate=self._on_delete_duplicate,
                         installed_uuids=self._installed_uuids,
                         deletion_state=self._get_delete_state(pack.uuid),
                         is_enabled=False,
+                        is_server_wide=False,
+                        has_location_conflict=(
+                            self._addon_conflict_key(pack)
+                            in self._dev_normal_conflict_keys
+                        ),
                     )
                     self._register_addon_card(card)
                     card.grid(row=row, column=0, sticky="ew", pady=5, padx=5)
@@ -764,9 +906,7 @@ class AddonPanel(ctk.CTkFrame):
     def _toggle_section(self, pack_type: PackType, section: str) -> None:
         """Toggle the collapsed state of a section."""
         if pack_type == PackType.BEHAVIOR:
-            if section == "beta_api":
-                self._behavior_beta_api_collapsed = not self._behavior_beta_api_collapsed
-            elif section == "missing_deps":
+            if section == "missing_deps":
                 self._behavior_missing_deps_collapsed = (
                     not self._behavior_missing_deps_collapsed
                 )
@@ -777,9 +917,7 @@ class AddonPanel(ctk.CTkFrame):
                     not self._behavior_disabled_collapsed
                 )
         else:
-            if section == "beta_api":
-                self._resource_beta_api_collapsed = not self._resource_beta_api_collapsed
-            elif section == "missing_deps":
+            if section == "missing_deps":
                 self._resource_missing_deps_collapsed = (
                     not self._resource_missing_deps_collapsed
                 )
@@ -870,6 +1008,36 @@ class AddonPanel(ctk.CTkFrame):
         if result:
             self._queue_addon_deletion(addon)
 
+    def _on_delete_duplicate(self, addon: Addon) -> None:
+        """Delete the duplicate copy from the opposite directory."""
+        if self._is_server_running():
+            self._show_server_running_warning()
+            return
+
+        counterpart = self._find_duplicate_counterpart(addon)
+        if counterpart is None:
+            messagebox.showinfo(
+                "Duplicate Not Found",
+                "No opposite-location duplicate was found for this addon.",
+            )
+            self.refresh()
+            return
+
+        location_text = (
+            "development directory"
+            if counterpart.is_development
+            else "normal directory"
+        )
+        result = messagebox.askyesno(
+            "Delete Duplicate",
+            f"Delete duplicate copy '{counterpart.name}' from the {location_text}?\n\n"
+            "The selected addon copy will be kept.",
+        )
+        if not result:
+            return
+
+        self._queue_addon_deletion(counterpart)
+
     def _on_move_up(self, addon: Addon) -> None:
         """Handle move up button click (increase priority)."""
         if self._get_delete_state(addon.uuid):
@@ -940,6 +1108,8 @@ class AddonPanel(ctk.CTkFrame):
         all_packs = (
             self.addon_manager.get_behavior_packs()
             + self.addon_manager.get_resource_packs()
+            + self.addon_manager.get_development_behavior_packs()
+            + self.addon_manager.get_development_resource_packs()
         )
 
         # Enable imported packs
@@ -1133,6 +1303,7 @@ class AddonCard(ctk.CTkFrame):
         addon_manager: AddonManager,
         on_toggle: Optional[Callable] = None,
         on_delete: Optional[Callable] = None,
+        on_delete_duplicate: Optional[Callable] = None,
         on_move_up: Optional[Callable] = None,
         on_move_down: Optional[Callable] = None,
         position: Optional[int] = None,
@@ -1140,6 +1311,8 @@ class AddonCard(ctk.CTkFrame):
         installed_uuids: Optional[set] = None,
         deletion_state: Optional[str] = None,
         is_enabled: bool = False,
+        is_server_wide: bool = False,
+        has_location_conflict: bool = False,
     ):
         super().__init__(parent)
 
@@ -1148,6 +1321,7 @@ class AddonCard(ctk.CTkFrame):
         self.addon_manager = addon_manager
         self.on_toggle = on_toggle
         self.on_delete = on_delete
+        self.on_delete_duplicate = on_delete_duplicate
         self.on_move_up = on_move_up
         self.on_move_down = on_move_down
         self.position = position
@@ -1155,9 +1329,14 @@ class AddonCard(ctk.CTkFrame):
         self.installed_uuids = installed_uuids or self._get_installed_uuids()
         self.deletion_state = deletion_state
         self.is_enabled = is_enabled
+        self.is_server_wide = is_server_wide
+        self.has_location_conflict = has_location_conflict
         self._has_issues = False
+        self._has_missing_deps = False
+        self._has_location_conflict = False
         self.info_container: Optional[ctk.CTkFrame] = None
         self.delete_status_label: Optional[ctk.CTkLabel] = None
+        self.delete_duplicate_btn: Optional[ctk.CTkButton] = None
 
         self._create_widgets()
 
@@ -1172,8 +1351,11 @@ class AddonCard(ctk.CTkFrame):
         missing_deps_count = len(
             self.addon.get_missing_dependencies(self.installed_uuids)
         )
+        self._has_missing_deps = has_missing_deps
+        self._has_location_conflict = self.has_location_conflict
 
-        # Determine if addon has issues (incompatible or missing dependencies)
+        # Determine if addon has critical issues (incompatible or missing dependencies).
+        # Location conflicts are highlighted separately.
         has_issues = not is_compatible or has_missing_deps
         self._has_issues = has_issues
         is_delete_queued = self.deletion_state in {"queued", "deleting"}
@@ -1185,8 +1367,12 @@ class AddonCard(ctk.CTkFrame):
         # Set border color for addons with issues
         if is_delete_queued:
             self.configure(border_width=2, border_color="#FFA000")
+        elif self.has_location_conflict:
+            self.configure(border_width=2, border_color="#D32F2F")
         elif has_issues:
             self.configure(border_width=2, border_color="#D32F2F")
+        elif has_beta_api_deps:
+            self.configure(border_width=2, border_color="#FF9800")
 
         # Main container using pack for stability
         main_container = ctk.CTkFrame(self, fg_color="transparent")
@@ -1229,7 +1415,15 @@ class AddonCard(ctk.CTkFrame):
             name_text = f"#{self.position + 1}  {self.addon.name}"
 
         # Use red text color for addons with issues
-        name_color = "#D32F2F" if has_issues else None
+        name_color = (
+            "#D32F2F"
+            if self.has_location_conflict
+            else "#D32F2F"
+            if has_issues
+            else "#FF9800"
+            if has_beta_api_deps
+            else None
+        )
 
         name_label = ctk.CTkLabel(
             info_container,
@@ -1242,24 +1436,42 @@ class AddonCard(ctk.CTkFrame):
 
         # Pack info - show warnings for issues
         info_text = f"v{self.addon.version_string}"
-        if not is_compatible and has_missing_deps:
-            # Both issues
-            info_text += f" (requires MC {self.addon.min_engine_version_string}, {missing_deps_count} missing dep(s))"
-        elif not is_compatible:
-            info_text += f" (requires MC {self.addon.min_engine_version_string})"
-        elif has_missing_deps:
-            info_text += f" ({missing_deps_count} missing dependency)"
-            if missing_deps_count > 1:
-                info_text = info_text.replace("dependency)", "dependencies)")
+        issue_messages: List[str] = []
+        if self.has_location_conflict:
+            issue_messages.append(
+                "Duplicate install: delete one copy (development or normal directory)"
+            )
+        if not is_compatible:
+            issue_messages.append(
+                f"requires MC {self.addon.min_engine_version_string}"
+            )
+        if has_missing_deps:
+            missing_text = (
+                f"{missing_deps_count} missing dependency"
+                if missing_deps_count == 1
+                else f"{missing_deps_count} missing dependencies"
+            )
+            issue_messages.append(missing_text)
+
+        if issue_messages:
+            info_text += f" ({'; '.join(issue_messages)})"
         elif has_beta_api_deps:
-            info_text += " (Requires Minecraft Beta API)"
+            info_text += " (Needs Beta APIs)"
         elif self.addon.description:
             desc = self.addon.description[:50]
             if len(self.addon.description) > 50:
                 desc += "..."
             info_text += f" - {desc}"
 
-        info_color = "#D32F2F" if has_issues else "gray"
+        info_color = (
+            "#D32F2F"
+            if self.has_location_conflict
+            else "#D32F2F"
+            if has_issues
+            else "#FF9800"
+            if has_beta_api_deps
+            else "gray"
+        )
 
         info_label = ctk.CTkLabel(
             info_container,
@@ -1325,7 +1537,14 @@ class AddonCard(ctk.CTkFrame):
             self.down_btn.pack(side="left", padx=2)
 
         # Disable switch for addons with missing dependencies
-        switch_state = "disabled" if has_missing_deps or is_delete_queued else "normal"
+        switch_state = (
+            "disabled"
+            if has_missing_deps
+            or is_delete_queued
+            or self.is_server_wide
+            or self.has_location_conflict
+            else "normal"
+        )
 
         self.switch_var = ctk.BooleanVar(value=self.is_enabled)
         self.switch = ctk.CTkSwitch(
@@ -1335,6 +1554,10 @@ class AddonCard(ctk.CTkFrame):
                 if self.deletion_state == "deleting"
                 else "Queued"
                 if self.deletion_state == "queued"
+                else "Always On"
+                if self.is_server_wide
+                else "Duplicate Install"
+                if self.has_location_conflict
                 else "Enabled"
                 if not has_missing_deps
                 else "Missing Deps"
@@ -1359,6 +1582,19 @@ class AddonCard(ctk.CTkFrame):
         )
         self.info_btn.pack(side="left", padx=(0, 5))
 
+        if self.has_location_conflict:
+            self.delete_duplicate_btn = ctk.CTkButton(
+                controls_frame,
+                text="Delete Duplicate",
+                width=130,
+                height=28,
+                fg_color="#D32F2F",
+                hover_color="#B71C1C",
+                command=self._on_delete_duplicate_click,
+                state="disabled" if is_delete_queued else "normal",
+            )
+            self.delete_duplicate_btn.pack(side="left", padx=(0, 5))
+
         # Delete button
         self.delete_btn = ctk.CTkButton(
             controls_frame,
@@ -1381,6 +1617,8 @@ class AddonCard(ctk.CTkFrame):
         all_addons = (
             self.addon_manager.get_behavior_packs()
             + self.addon_manager.get_resource_packs()
+            + self.addon_manager.get_development_behavior_packs()
+            + self.addon_manager.get_development_resource_packs()
         )
         return {addon.uuid for addon in all_addons}
 
@@ -1397,6 +1635,12 @@ class AddonCard(ctk.CTkFrame):
 
     def _on_switch_toggle(self) -> None:
         """Handle switch toggle."""
+        if self.is_server_wide:
+            self.switch_var.set(True)
+            return
+        if self.has_location_conflict:
+            self.switch_var.set(self.is_enabled)
+            return
         if self.on_toggle:
             self.on_toggle(self.addon, self.switch_var.get())
 
@@ -1404,6 +1648,11 @@ class AddonCard(ctk.CTkFrame):
         """Handle delete button click."""
         if self.on_delete:
             self.on_delete(self.addon)
+
+    def _on_delete_duplicate_click(self) -> None:
+        """Handle delete duplicate button click."""
+        if self.on_delete_duplicate:
+            self.on_delete_duplicate(self.addon)
 
     def _on_move_up_click(self) -> None:
         """Handle move up button click."""
@@ -1431,8 +1680,12 @@ class AddonCard(ctk.CTkFrame):
 
         if is_delete_queued:
             self.configure(border_width=2, border_color="#FFA000")
+        elif self._has_location_conflict:
+            self.configure(border_width=2, border_color="#D32F2F")
         elif self._has_issues:
             self.configure(border_width=2, border_color="#D32F2F")
+        elif self.addon.has_minecraft_beta_dependencies():
+            self.configure(border_width=2, border_color="#FF9800")
         else:
             self.configure(border_width=0)
 
@@ -1463,14 +1716,32 @@ class AddonCard(ctk.CTkFrame):
             if state == "deleting"
             else "Queued"
             if state == "queued"
+            else "Always On"
+            if self.is_server_wide
+            else "Duplicate Install"
+            if self._has_location_conflict
+            else "Missing Deps"
+            if self._has_missing_deps
             else "Enabled"
             if self.switch_var.get()
             else "Disabled"
         )
         self.switch.configure(
-            text=switch_text, state="disabled" if is_delete_queued else "normal"
+            text=switch_text,
+            state=(
+                "disabled"
+                if is_delete_queued
+                or self._has_missing_deps
+                or self.is_server_wide
+                or self._has_location_conflict
+                else "normal"
+            ),
         )
         self.info_btn.configure(state="disabled" if is_delete_queued else "normal")
+        if self.delete_duplicate_btn is not None:
+            self.delete_duplicate_btn.configure(
+                state="disabled" if is_delete_queued else "normal"
+            )
         self.delete_btn.configure(
             text="Deleting"
             if state == "deleting"

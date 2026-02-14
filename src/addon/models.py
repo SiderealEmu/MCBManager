@@ -103,6 +103,14 @@ class Addon:
             return ""
         return normalized.split("/")[-1]
 
+    @property
+    def is_development(self) -> bool:
+        """Return True when addon is sourced from development_*_packs."""
+        normalized = str(self.path).replace("\\", "/").lstrip("/")
+        return normalized.startswith("development_behavior_packs/") or normalized.startswith(
+            "development_resource_packs/"
+        )
+
     @classmethod
     def set_default_pack_uuids(cls, uuids: Set[str]) -> None:
         """Set the default pack UUIDs from config."""

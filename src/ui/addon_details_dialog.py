@@ -60,6 +60,8 @@ class AddonDetailsDialog(ctk.CTkToplevel):
         all_addons = (
             self.addon_manager.get_behavior_packs()
             + self.addon_manager.get_resource_packs()
+            + self.addon_manager.get_development_behavior_packs()
+            + self.addon_manager.get_development_resource_packs()
         )
         for addon in all_addons:
             self._installed_addons_by_uuid[addon.uuid] = addon
